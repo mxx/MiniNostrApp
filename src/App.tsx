@@ -113,16 +113,26 @@ export function saveCachedEvents(events: NostrEvent[]): void {
   }
 }
 
-// ---- 浏览模式：自动轮播 / 手动 ----
+// ---- 浏览模式：自动跑马灯 / 手动 ----
 
 export type ViewMode = "auto" | "manual";
 
 const VIEW_MODE_STORAGE_KEY = "nostr-min-view-mode-v1";
 
-/** 自动轮播：每张帖子停留多久（毫秒）；进入动画从左上、退出动画向右下挤出。 */
-export const AUTO_ADVANCE_MS = 8000;
-/** 退出动画时长（毫秒），必须小于 AUTO_ADVANCE_MS。 */
-export const AUTO_EXIT_MS = 450;
+/** 跑马灯行数。 */
+export const MARQUEE_ROWS = 2;
+/** 跑马灯卡片宽度（px），必须与 .marquee-card 的 CSS 宽度一致。 */
+export const MARQUEE_CARD_W = 300;
+/** 跑马灯卡片间距（px），必须与 .marquee-track 的 CSS gap 一致。 */
+export const MARQUEE_GAP = 16;
+/** 单步位移 = 卡片宽 + 间距；循环与前置新帖时按此步长补偿，视觉无跳动。 */
+export const MARQUEE_STEP = MARQUEE_CARD_W + MARQUEE_GAP;
+/** 每行速度（px/秒），方向：从左进入、向右溢出。 */
+export const MARQUEE_SPEEDS = [80, 56];
+/** 跑马灯每行最多保留的帖子数（循环队列上限）。 */
+export const MARQUEE_MAX_NOTES = 60;
+/** 单次新帖超过此数时直接按新帖池重建，避免 offset 左移过远长时间空白。 */
+export const MARQUEE_RESET_THRESHOLD = 12;
 
 export function loadViewMode(): ViewMode {
   try {
@@ -140,11 +150,28 @@ export function saveViewMode(mode: ViewMode): void {
   }
 }
 
-/** 自动轮播的下一张序号：越界/非法输入一律回到开头。 */
-export function nextAutoIndex(current: number, length: number): number {
-  if (length <= 0) return 0;
-  if (!Number.isInteger(current) || current < 0 || current >= length) return 0;
-  return (current + 1) % length;
+/** 跑马灯向右流动一帧后的偏移：offset 增大，卡片整体向右移动。 */
+export function marqueeStepOffset(offset: number, dtMs: number, speedPxPerSec: number): number {
+  return offset + (speedPxPerSec * dtMs) / 1000;
+}
+
+/**
+ * 右端整张卡片完全溢出后，把它搬到最左端继续循环；
+ * offset 同步回退一个步长，画面无跳动。不足两张或尚未溢出时原样返回。
+ */
+export function marqueeRecycle<T>(items: T[], offset: number, step: number): { items: T[]; offset: number } {
+  if (items.length < 2 || offset < step) return { items, offset };
+  const tail = items[items.length - 1] as T;
+  return { items: [tail, ...items.slice(0, -1)], offset: offset - step };
+}
+
+/**
+ * 新帖从左侧进入：在队首前置新帖，同时把 offset 向左移相同步数，
+ * 存量卡片的视觉位置保持不动。fresh 为空时原样返回。
+ */
+export function marqueePrepend<T>(items: T[], offset: number, fresh: T[], step: number): { items: T[]; offset: number } {
+  if (fresh.length === 0) return { items, offset };
+  return { items: [...fresh, ...items], offset: offset - step * fresh.length };
 }
 
 /** NIP-10 回复标签：e 标签带中继提示与 reply 标记，p 标签指向原作者。 */
@@ -479,6 +506,121 @@ function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
   );
 }
 
+/** 自动模式的一行跑马灯：卡片从左进入、向右溢出，requestAnimationFrame 驱动。 */
+function MarqueeRow({ notes, speed, initialRotate, paused, profileCache, onOpenProfile, onOpenNote, onReply }: {
+  notes: NostrEvent[];
+  speed: number;
+  initialRotate: number;
+  paused: boolean;
+  profileCache: Record<string, ProfileEntry>;
+  onOpenProfile: (pubkey: string) => void;
+  onOpenNote: (eventId: string) => void;
+  onReply: (item: NostrEvent) => void;
+}) {
+  const rotateIds = (ids: string[], n: number) => {
+    if (ids.length === 0) return ids;
+    const k = ((n % ids.length) + ids.length) % ids.length;
+    return [...ids.slice(k), ...ids.slice(0, k)];
+  };
+  const [initial] = useState(() => {
+    const ids = rotateIds(
+      notes.map((note) => note.id),
+      initialRotate,
+    );
+    return { ids, map: new Map(notes.map((note) => [note.id, note] as [string, NostrEvent])) };
+  });
+  const [order, setOrder] = useState<string[]>(initial.ids);
+  const orderRef = useRef(order);
+  const offsetRef = useRef(0);
+  const seenRef = useRef<Set<string>>(new Set(orderRef.current));
+  const noteMapRef = useRef(initial.map);
+  const trackRef = useRef<HTMLDivElement>(null);
+
+  const applyOffset = (value: number) => {
+    if (trackRef.current) trackRef.current.style.transform = `translate3d(${value}px, 0, 0)`;
+  };
+
+  // 新帖到达：把没见过的 id 前置到队首（从左侧进入），offset 左移补偿；
+  // 单次大量到达则按新帖池重建，避免 offset 漂出太远长时间空白。
+  useEffect(() => {
+    for (const note of notes) {
+      if (!noteMapRef.current.has(note.id)) noteMapRef.current.set(note.id, note);
+    }
+    const fresh = notes.map((note) => note.id).filter((id) => !seenRef.current.has(id));
+    let items = orderRef.current;
+    let offset = offsetRef.current;
+    if (fresh.length > MARQUEE_RESET_THRESHOLD) {
+      items = rotateIds(
+        notes.map((note) => note.id),
+        initialRotate,
+      );
+      offset = 0;
+      seenRef.current = new Set(items);
+      noteMapRef.current = new Map(notes.map((note) => [note.id, note] as [string, NostrEvent]));
+    } else if (fresh.length > 0) {
+      fresh.forEach((id) => seenRef.current.add(id));
+      const prepended = marqueePrepend(items, offset, fresh, MARQUEE_STEP);
+      items = prepended.items;
+      offset = prepended.offset;
+    }
+    if (items.length > MARQUEE_MAX_NOTES) {
+      const dropped = items.slice(MARQUEE_MAX_NOTES);
+      items = items.slice(0, MARQUEE_MAX_NOTES);
+      dropped.forEach((id) => noteMapRef.current.delete(id));
+    }
+    orderRef.current = items;
+    offsetRef.current = offset;
+    applyOffset(offset);
+    setOrder(items);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes]);
+
+  // rAF 主循环：offset 直接写 DOM，不经过 React state，避免每帧重渲染。
+  useEffect(() => {
+    if (paused) return;
+    let raf = 0;
+    let last = -1;
+    const tick = (now: number) => {
+      if (last < 0) last = now;
+      const dt = Math.min(now - last, 100);
+      last = now;
+      let offset = marqueeStepOffset(offsetRef.current, dt, speed);
+      let items = orderRef.current;
+      let guard = 0;
+      while (offset >= MARQUEE_STEP && items.length > 1 && guard++ < 8) {
+        const recycled = marqueeRecycle(items, offset, MARQUEE_STEP);
+        items = recycled.items;
+        offset = recycled.offset;
+      }
+      if (items !== orderRef.current) {
+        orderRef.current = items;
+        setOrder(items);
+      }
+      offsetRef.current = offset;
+      applyOffset(offset);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [paused, speed]);
+
+  return (
+    <div className="marquee-row">
+      <div className="marquee-track" ref={trackRef}>
+        {order.map((id) => {
+          const note = noteMapRef.current.get(id);
+          if (!note) return null;
+          return (
+            <article key={id} className="note marquee-card">
+              <NoteCard item={note} profileCache={profileCache} onOpenProfile={onOpenProfile} onOpenNote={onOpenNote} onReply={onReply} />
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [relays, setRelays] = useState<RelayConfig[]>(loadRelays);
   const [relayStates, setRelayStates] = useState<Record<string, RelayState>>({});
@@ -503,9 +645,13 @@ export function App() {
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   const [manualEvents, setManualEvents] = useState<NostrEvent[]>(() => loadCachedEvents());
-  const [autoIndex, setAutoIndex] = useState(0);
-  const [autoPhase, setAutoPhase] = useState<"enter" | "exit">("enter");
   const [autoPaused, setAutoPaused] = useState(false);
+  const [reducedMotion] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
   const publishAcksRef = useRef<Map<string, Set<string>>>(new Map());
@@ -539,56 +685,26 @@ export function App() {
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
   const feedEvents = viewMode === "manual" ? manualEvents : events;
   const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
-  const safeAutoIndex = autoIndex < visibleEvents.length ? autoIndex : 0;
-  const currentAuto = visibleEvents[safeAutoIndex] ?? null;
+  // 跑马灯帖池：最新在前；行内按"最新在左"排列，新帖从左侧进入。
+  const marqueePool = useMemo(() => visibleEvents.slice(0, MARQUEE_MAX_NOTES), [visibleEvents]);
   const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
   const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
   const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen;
+  const marqueePaused = autoPaused || modalOpen || reducedMotion;
 
-  // 浏览模式持久化；切换模式或筛选页签时轮播回到第一张。
+  // 浏览模式持久化；切到手动模式时冻结当前快照。
   useEffect(() => {
     saveViewMode(viewMode);
   }, [viewMode]);
 
   useEffect(() => {
-    setAutoIndex(0);
-    setAutoPhase("enter");
     if (viewMode === "manual") setManualEvents(eventsRef.current);
-  }, [viewMode, feedTab]);
+  }, [viewMode]);
 
   function refreshManualFeed() {
     setManualEvents(eventsRef.current);
     setConnectionEpoch((value) => value + 1);
   }
-
-  // 自动刷新：列表头部出现新帖子时，轮播跳到最新一张。
-  const headIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    const head = visibleEvents[0]?.id ?? null;
-    if (headIdRef.current !== null && head !== null && head !== headIdRef.current && viewMode === "auto") {
-      setAutoIndex(0);
-      setAutoPhase("enter");
-    }
-    headIdRef.current = head;
-  }, [visibleEvents, viewMode]);
-
-  // 自动轮播：停留 AUTO_ADVANCE_MS 后先播出场动画，再切到下一张播入场动画。
-  // 暂停、弹窗打开或无内容时不推进；鼠标悬停卡片也会暂停（见 auto-stage）。
-  useEffect(() => {
-    if (viewMode !== "auto" || autoPaused || modalOpen || visibleEvents.length === 0) return;
-    let exitTimer: number | undefined;
-    const advanceTimer = window.setTimeout(() => {
-      setAutoPhase("exit");
-      exitTimer = window.setTimeout(() => {
-        setAutoIndex((index) => nextAutoIndex(index, visibleEvents.length));
-        setAutoPhase("enter");
-      }, AUTO_EXIT_MS);
-    }, AUTO_ADVANCE_MS);
-    return () => {
-      window.clearTimeout(advanceTimer);
-      if (exitTimer !== undefined) window.clearTimeout(exitTimer);
-    };
-  }, [viewMode, autoPaused, modalOpen, autoIndex, visibleEvents.length]);
   const profileEntry = profilePubkey ? profileCache[profilePubkey] : undefined;
   const profileDetail = profileEntry?.profile;
   const isFollowing = profilePubkey ? follows.includes(profilePubkey) : false;
@@ -967,26 +1083,32 @@ export function App() {
           </ol>
         ) : (
           <section
-            className={`auto-stage${autoPaused ? " paused" : ""}`}
-            aria-live="polite"
-            aria-label="帖子自动轮播"
+            className={`auto-stage${marqueePaused ? " paused" : ""}`}
+            aria-label="帖子跑马灯"
             onMouseEnter={() => setAutoPaused(true)}
             onMouseLeave={() => setAutoPaused(false)}
           >
-            {currentAuto && (
-              <article key={currentAuto.id} className={`note auto-note ${autoPhase === "exit" ? "auto-exit" : "auto-enter"}`}>
-                <NoteCard item={currentAuto} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
-              </article>
-            )}
+            <div className="marquee-rows">
+              {Array.from({ length: MARQUEE_ROWS }, (_, row) => (
+                <MarqueeRow
+                  key={`${feedTab}-${row}`}
+                  notes={marqueePool}
+                  speed={MARQUEE_SPEEDS[row] ?? MARQUEE_SPEEDS[0] ?? 60}
+                  initialRotate={row === 0 ? 0 : Math.floor(marqueePool.length / 2)}
+                  paused={marqueePaused}
+                  profileCache={profileCache}
+                  onOpenProfile={openProfile}
+                  onOpenNote={openNote}
+                  onReply={openReply}
+                />
+              ))}
+            </div>
             <div className="auto-bar">
-              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续自动轮播" : "暂停自动轮播"}>
+              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续跑马灯" : "暂停跑马灯"}>
                 <Icon name={autoPaused ? "play" : "pause"} />
               </button>
-              <span className="auto-count">{safeAutoIndex + 1} / {visibleEvents.length}</span>
-              <span className="auto-hint">悬停暂停 · 新帖自动刷新</span>
-            </div>
-            <div className="auto-progress" aria-hidden="true">
-              <i key={currentAuto?.id ?? "none"} style={{ animationDuration: `${AUTO_ADVANCE_MS}ms` }} />
+              <span className="auto-count">{marqueePool.length} 条帖子</span>
+              <span className="auto-hint">悬停暂停 · 新帖从左侧进入</span>
             </div>
           </section>
         )}

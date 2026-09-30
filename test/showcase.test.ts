@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
-  AUTO_ADVANCE_MS,
-  AUTO_EXIT_MS,
+  MARQUEE_CARD_W,
+  MARQUEE_GAP,
+  MARQUEE_MAX_NOTES,
+  MARQUEE_RESET_THRESHOLD,
+  MARQUEE_ROWS,
+  MARQUEE_SPEEDS,
+  MARQUEE_STEP,
   buildReplyTags,
   loadViewMode,
-  nextAutoIndex,
+  marqueePrepend,
+  marqueeRecycle,
+  marqueeStepOffset,
   saveViewMode,
 } from "../src/App";
 import { installLocalStorageMock, SAMPLE_HEX_ID, SAMPLE_HEX_PUBKEY } from "./fixtures";
@@ -45,31 +52,60 @@ describe("浏览模式持久化（自动 / 手动）", () => {
   });
 });
 
-describe("自动轮播序号", () => {
-  test("正常递进", () => {
-    expect(nextAutoIndex(0, 3)).toBe(1);
-    expect(nextAutoIndex(1, 3)).toBe(2);
+describe("跑马灯数学（从左进入、向右溢出）", () => {
+  test("步进：offset 随时间增大（向右流动）", () => {
+    expect(marqueeStepOffset(0, 1000, 80)).toBe(80);
+    expect(marqueeStepOffset(10, 500, 80)).toBe(50);
+    expect(marqueeStepOffset(0, 0, 80)).toBe(0);
   });
 
-  test("末尾回到开头", () => {
-    expect(nextAutoIndex(2, 3)).toBe(0);
+  test("循环：右端整张溢出后搬到最左端，offset 回退一步", () => {
+    const r = marqueeRecycle(["a", "b", "c"], MARQUEE_STEP, MARQUEE_STEP);
+    expect(r.items).toEqual(["c", "a", "b"]);
+    expect(r.offset).toBe(0);
   });
 
-  test("空列表停在 0", () => {
-    expect(nextAutoIndex(0, 0)).toBe(0);
-    expect(nextAutoIndex(3, 0)).toBe(0);
+  test("循环：未溢出时原样返回", () => {
+    const items = ["a", "b", "c"];
+    const r = marqueeRecycle(items, MARQUEE_STEP - 1, MARQUEE_STEP);
+    expect(r.items).toBe(items);
+    expect(r.offset).toBe(MARQUEE_STEP - 1);
   });
 
-  test("越界 / 非法序号回到开头", () => {
-    expect(nextAutoIndex(5, 3)).toBe(0);
-    expect(nextAutoIndex(-1, 3)).toBe(0);
-    expect(nextAutoIndex(Number.NaN, 3)).toBe(0);
+  test("循环：不足两张不搬", () => {
+    expect(marqueeRecycle(["a"], MARQUEE_STEP * 2, MARQUEE_STEP).items).toEqual(["a"]);
+    expect(marqueeRecycle([], MARQUEE_STEP * 2, MARQUEE_STEP).items).toEqual([]);
   });
 
-  test("时间常量合理：退出动画短于停留时长", () => {
-    expect(AUTO_ADVANCE_MS).toBeGreaterThan(0);
-    expect(AUTO_EXIT_MS).toBeGreaterThan(0);
-    expect(AUTO_EXIT_MS).toBeLessThan(AUTO_ADVANCE_MS);
+  test("新帖前置：队首加新帖，offset 左移相同步数", () => {
+    const r = marqueePrepend(["b", "c"], 0, ["a"], MARQUEE_STEP);
+    expect(r.items).toEqual(["a", "b", "c"]);
+    expect(r.offset).toBe(-MARQUEE_STEP);
+  });
+
+  test("新帖前置：多个新帖保持最新在最左", () => {
+    const r = marqueePrepend(["c"], 0, ["a", "b"], MARQUEE_STEP);
+    expect(r.items).toEqual(["a", "b", "c"]);
+    expect(r.offset).toBe(-2 * MARQUEE_STEP);
+  });
+
+  test("新帖前置：空 fresh 原样返回", () => {
+    const items = ["b", "c"];
+    const r = marqueePrepend(items, 5, [], MARQUEE_STEP);
+    expect(r.items).toBe(items);
+    expect(r.offset).toBe(5);
+  });
+
+  test("常量合理", () => {
+    expect(MARQUEE_ROWS).toBe(2);
+    expect(MARQUEE_STEP).toBe(MARQUEE_CARD_W + MARQUEE_GAP);
+    expect(MARQUEE_CARD_W).toBe(300);
+    expect(MARQUEE_GAP).toBe(16);
+    expect(MARQUEE_SPEEDS).toHaveLength(MARQUEE_ROWS);
+    for (const speed of MARQUEE_SPEEDS) expect(speed).toBeGreaterThan(0);
+    expect(MARQUEE_MAX_NOTES).toBeGreaterThan(0);
+    expect(MARQUEE_RESET_THRESHOLD).toBeGreaterThan(0);
+    expect(MARQUEE_RESET_THRESHOLD).toBeLessThan(MARQUEE_MAX_NOTES);
   });
 });
 
@@ -98,27 +134,30 @@ describe("NIP-10 回复标签", () => {
   });
 });
 
-describe("自动轮播样式（显示回归）", () => {
-  test("进入 / 退出关键帧存在", () => {
-    expect(css).toContain("@keyframes auto-enter-tl");
-    expect(css).toContain("@keyframes auto-exit-br");
-    expect(css).toContain("@keyframes auto-progress-fill");
+describe("跑马灯样式（显示回归）", () => {
+  test("旧单卡轮播动画已移除", () => {
+    expect(css).not.toContain("@keyframes auto-enter-tl");
+    expect(css).not.toContain("@keyframes auto-exit-br");
+    expect(css).not.toContain("@keyframes auto-progress-fill");
+    expect(css).not.toContain("auto-progress");
   });
 
-  test("进入动画从左上开始（负位移）", () => {
-    expect(css).toContain("translate(-64px, -64px)");
+  test("行容器裁掉溢出（卡片从左右两端进出）", () => {
+    const row = css.match(/\.marquee-row\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(row).toContain("overflow");
+    expect(row).toContain("hidden");
   });
 
-  test("退出动画向右下挤出（正位移 + 缩小）", () => {
-    expect(css).toContain("translate(72px, 72px)");
-    expect(css).toContain("scale(.8)");
+  test("轨道是横向弹性行，JS 步长与 CSS 一致", () => {
+    const track = css.match(/\.marquee-track\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(track).toContain("display: flex");
+    expect(track).toContain("gap: 16px");
+    const card = css.match(/\.marquee-card\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(card).toContain("300px");
   });
 
-  test("自动模式锁定视口，舞台本身也无滚动", () => {
-    const stage = css.match(/\.auto-stage\s*\{([^}]*)\}/)?.[1] ?? "";
+  test("自动模式锁定视口无滚动", () => {
     const shell = css.match(/\.app-shell\.auto-mode\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(stage).toContain("overflow");
-    expect(stage).toContain("hidden");
     expect(shell).toContain("100dvh");
     expect(shell).toContain("overflow: hidden");
   });
@@ -128,14 +167,14 @@ describe("自动轮播样式（显示回归）", () => {
       "view-switch",
       "view-option",
       "auto-stage",
-      "auto-note",
-      "auto-enter",
-      "auto-exit",
+      "marquee-rows",
+      "marquee-row",
+      "marquee-track",
+      "marquee-card",
       "auto-bar",
       "auto-pause",
       "auto-count",
       "auto-hint",
-      "auto-progress",
       "note-actions",
       "reply-button",
       "detail-actions",
@@ -148,10 +187,10 @@ describe("自动轮播样式（显示回归）", () => {
   });
 });
 
-describe("App 接线（自动模式 / 回复）", () => {
-  test("轮播定时器使用导出的时间常量", () => {
-    expect(appSrc).toContain("AUTO_ADVANCE_MS");
-    expect(appSrc).toContain("AUTO_EXIT_MS");
+describe("App 接线（跑马灯 / 回复）", () => {
+  test("跑马灯用 rAF 驱动并写 translate3d", () => {
+    expect(appSrc).toContain("requestAnimationFrame");
+    expect(appSrc).toContain("translate3d(");
   });
 
   test("回复经 publishNote + buildReplyTags 发布", () => {
@@ -159,18 +198,20 @@ describe("App 接线（自动模式 / 回复）", () => {
     expect(appSrc).toContain("publishNote(content,");
   });
 
-  test("悬停卡片暂停轮播", () => {
+  test("悬停暂停跑马灯", () => {
     expect(appSrc).toContain("onMouseEnter");
     expect(appSrc).toContain("setAutoPaused(true)");
     expect(appSrc).toContain("setAutoPaused(false)");
   });
 
-  test("弹窗打开时不推进", () => {
+  test("弹窗打开或减少动态时不推进", () => {
     expect(appSrc).toContain("modalOpen");
+    expect(appSrc).toContain("prefers-reduced-motion");
   });
 
-  test("新帖到达时跳到最新", () => {
-    expect(appSrc).toContain("headIdRef");
+  test("新帖从左侧进入（前置 + 跑马灯行）", () => {
+    expect(appSrc).toContain("marqueePrepend");
+    expect(appSrc).toContain("MarqueeRow");
   });
 
   test("手动模式冻结快照，只有刷新按钮主动更新", () => {
@@ -179,7 +220,8 @@ describe("App 接线（自动模式 / 回复）", () => {
     expect(appSrc).toContain('aria-label="手动刷新帖子"');
   });
 
-  test("卡片与详情页都有回复入口", () => {
+  test("跑马灯卡片复用 NoteCard，保留回复入口", () => {
+    expect(appSrc).toContain("marquee-card");
     expect(appSrc).toContain("openReply");
     expect(appSrc).toContain("reply-context");
   });
