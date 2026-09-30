@@ -34,6 +34,11 @@ describe("sw.js", () => {
     expect(sw).toContain("caches.delete");
   });
 
+  test("当前缓存版本为 v5（bundle 变化时必须 bump 并同步更新此断言）", () => {
+    const sw = read("sw.js");
+    expect(sw).toContain('const CACHE_VERSION = "v5"');
+  });
+
   test("预缓存 app shell（源码保留开发环境 fallback）", () => {
     const sw = read("sw.js");
     expect(sw).toContain('"./"');
