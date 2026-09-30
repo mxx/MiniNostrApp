@@ -4,7 +4,10 @@ import {
   AUTO_GRID_CARD_H,
   AUTO_GRID_CARD_MIN_W,
   AUTO_GRID_GAP,
+  AUTO_GRID_NARROW_COLS,
+  AUTO_GRID_NARROW_W,
   autoGridCapacity,
+  autoGridTile,
   autoGridWindow,
   avatarDisplay,
   buildReplyTags,
@@ -82,6 +85,53 @@ describe("自动网格数学（从左向右、从上向下推进）", () => {
     expect(AUTO_GRID_CARD_MIN_W).toBe(300);
     expect(AUTO_GRID_CARD_H).toBe(340);
     expect(AUTO_GRID_GAP).toBe(12);
+    expect(AUTO_GRID_NARROW_W).toBe(700);
+    expect(AUTO_GRID_NARROW_COLS).toBe(3);
+  });
+
+  test("窄屏 tile：竖分三列、卡片按列宽等比缩小", () => {
+    const tile = autoGridTile(304);
+    expect(tile.narrow).toBe(true);
+    expect(tile.scale).toBeCloseTo(((304 - 2 * AUTO_GRID_GAP) / 3) / AUTO_GRID_CARD_MIN_W, 5);
+    expect(tile.cardH).toBe(Math.round(AUTO_GRID_CARD_H * tile.scale));
+    expect(tile.cardH).toBeLessThan(AUTO_GRID_CARD_H);
+  });
+
+  test("窄屏容量：列数固定 3，行数按缩小后的块高重算", () => {
+    const tile = autoGridTile(304);
+    const c = autoGridCapacity(304, 600);
+    expect(c.cols).toBe(3);
+    expect(c.rows).toBe(Math.max(1, Math.floor((600 + AUTO_GRID_GAP) / (tile.cardH + AUTO_GRID_GAP))));
+    expect(c.count).toBe(c.cols * c.rows);
+  });
+
+  test("窄屏边界：700 以下启用、700 及以上走桌面口径", () => {
+    expect(autoGridTile(699).narrow).toBe(true);
+    expect(autoGridTile(700).narrow).toBe(false);
+    expect(autoGridCapacity(700, 600).cols).toBe(Math.max(1, Math.floor((700 + AUTO_GRID_GAP) / (AUTO_GRID_CARD_MIN_W + AUTO_GRID_GAP))));
+  });
+
+  test("极窄舞台不启用窄屏（视为尚未布局完成）", () => {
+    expect(autoGridTile(100)).toEqual({ cardH: 340, scale: 1, narrow: false });
+    expect(autoGridCapacity(100, 100)).toEqual({ cols: 1, rows: 1, count: 1 });
+  });
+
+  test("桌面 tile 保持 340px 不缩放", () => {
+    expect(autoGridTile(960)).toEqual({ cardH: 340, scale: 1, narrow: false });
+  });
+
+  test("窄屏接线：App 注入列数/块高/缩放变量并挂 narrow 类", () => {
+    expect(appSrc).toContain('auto-grid${gridTile.narrow ? " narrow" : ""}');
+    expect(appSrc).toContain("--auto-card-h");
+    expect(appSrc).toContain("--auto-scale");
+    expect(appSrc).toContain("AUTO_GRID_NARROW_COLS");
+  });
+
+  test("窄屏样式：显示块整块等比缩小", () => {
+    expect(css).toContain(".auto-grid.narrow .note");
+    expect(css).toContain("height: var(--auto-card-h)");
+    expect(css).toContain("calc(31px * var(--auto-scale))");
+    expect(css).toContain(".auto-grid.narrow .note-footer");
   });
 });
 

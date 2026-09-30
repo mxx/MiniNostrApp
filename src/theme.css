@@ -24,6 +24,9 @@
   --danger: #c4433b;
   --warning: #8a5b00;
   --radius: 14px;
+  /* 自动网格窄屏变量的默认值（运行时由 JS 按舞台实测宽度覆盖）： */
+  --auto-card-h: 340px;
+  --auto-scale: 1;
   --space-surface: var(--surface);
   --space-surface-alt: var(--surface-raised);
   --space-muted: var(--dim);
@@ -301,6 +304,15 @@ h2 { font-size: 24px; line-height: 1.08; }
 /* 自动网格复用手动的 .feed-list 布局；内容轮换是整格直接替换，不做任何动画。 */
 .auto-grid { height: 100%; overflow: hidden; }
 .auto-grid .note { animation: none; transition: none; }
+/* 窄屏（手机）自动网格：竖分三列，显示块按 --auto-scale 等比缩小
+   （列数/块高/缩放系数由 JS 按舞台实测宽度注入，点小块进入详情）。 */
+.auto-grid.narrow .note { height: var(--auto-card-h); padding: calc(14px * var(--auto-scale)); }
+.auto-grid.narrow .avatar-mark { width: calc(31px * var(--auto-scale)); height: calc(31px * var(--auto-scale)); font-size: calc(10px * var(--auto-scale)); border-radius: calc(8px * var(--auto-scale)) calc(8px * var(--auto-scale)) calc(8px * var(--auto-scale)) calc(2px * var(--auto-scale)); }
+.auto-grid.narrow .note-meta { grid-template-columns: calc(31px * var(--auto-scale)) minmax(0, 1fr); gap: calc(6px * var(--auto-scale)); }
+.auto-grid.narrow .note-meta time { display: none; }
+.auto-grid.narrow .author { padding: 0; font-size: calc(12px * var(--auto-scale)); }
+.auto-grid.narrow .note-content { margin: calc(8px * var(--auto-scale)) 0 0; font-size: calc(15px * var(--auto-scale)); line-height: 1.5; -webkit-line-clamp: 4; }
+.auto-grid.narrow .note-footer, .auto-grid.narrow .expand-hint { display: none; }
 .app-version { margin-left: 8px; color: var(--dim); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
 .auto-bar { margin: 12px 20px 0; display: flex; align-items: center; gap: 10px; }
 .auto-count { color: var(--dim); font: 600 12px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; }

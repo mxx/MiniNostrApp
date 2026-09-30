@@ -7,6 +7,7 @@ useRef,
 useState,
 type FormEvent,
 type ReactNode,
+type CSSProperties,
 } from "react";
 
 type RelayState = "connecting" | "online" | "offline";
@@ -142,11 +143,40 @@ export const AUTO_GRID_CARD_MIN_W = 300;
 export const AUTO_GRID_CARD_H = 340;
 /** 自动网格：卡片间距（px），必须与 .feed-list 的 gap 一致。 */
 export const AUTO_GRID_GAP = 12;
+/** 窄屏阈值：舞台宽度小于此值时，自动网格竖分三列、显示块等比缩小。 */
+export const AUTO_GRID_NARROW_W = 700;
+/** 窄屏列数：屏幕竖分三块。 */
+export const AUTO_GRID_NARROW_COLS = 3;
+/** 窄屏下限：舞台宽度小于此值视为尚未布局完成，不启用窄屏模式。 */
+export const AUTO_GRID_NARROW_MIN_W = 240;
+
+export interface AutoGridTile { cardH: number; scale: number; narrow: boolean }
+
+/**
+ * 按舞台宽度算出自动网格的显示块尺寸。
+ * 窄屏（手机）时竖分三列，卡片高度按列宽相对 300px 的比例等比缩小；
+ * 缩放系数经 --auto-scale 注入 CSS，块内的头像/字号/边距同步缩小。
+ */
+export function autoGridTile(stageW: number): AutoGridTile {
+  if (stageW >= AUTO_GRID_NARROW_MIN_W && stageW < AUTO_GRID_NARROW_W) {
+    const cardW = (stageW - (AUTO_GRID_NARROW_COLS - 1) * AUTO_GRID_GAP) / AUTO_GRID_NARROW_COLS;
+    const scale = cardW / AUTO_GRID_CARD_MIN_W;
+    return { cardH: Math.round(AUTO_GRID_CARD_H * scale), scale, narrow: true };
+  }
+  return { cardH: AUTO_GRID_CARD_H, scale: 1, narrow: false };
+}
 /**
  * 按舞台实际尺寸算出能完整放下的列数/行数。
- * 列数公式与 .feed-list 的 auto-fill 口径一致，避免渲染出放不下的半行。
+ * 列数公式与 .feed-list 的 auto-fill 口径一致，避免渲染出放不下的半行；
+ * 窄屏时固定竖分三列，行数按缩小后的卡片高度重算。
  */
 export function autoGridCapacity(stageW: number, stageH: number): { cols: number; rows: number; count: number } {
+  const tile = autoGridTile(stageW);
+  if (tile.narrow) {
+    const cols = AUTO_GRID_NARROW_COLS;
+    const rows = Math.max(1, Math.floor((stageH + AUTO_GRID_GAP) / (tile.cardH + AUTO_GRID_GAP)));
+    return { cols, rows, count: cols * rows };
+  }
   const cols = Math.max(1, Math.floor((stageW + AUTO_GRID_GAP) / (AUTO_GRID_CARD_MIN_W + AUTO_GRID_GAP)));
   const rows = Math.max(1, Math.floor((stageH + AUTO_GRID_GAP) / (AUTO_GRID_CARD_H + AUTO_GRID_GAP)));
   return { cols, rows, count: cols * rows };
@@ -1137,12 +1167,17 @@ export function App() {
   // 自动网格保持严格时间倒序：最新在左上角，之后从左到右、从上到下。
   // 视口只显示能完整容纳的格数；新帖到达时列表原地重排，不做动画或循环轮换。
   const [gridCapacity, setGridCapacity] = useState(() => autoGridCapacity(960, 700));
+  const [gridTile, setGridTile] = useState<AutoGridTile>(() => autoGridTile(960));
   const autoGridWrapRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (viewMode !== "auto") return;
     const el = autoGridWrapRef.current;
     if (!el) return;
-    const measure = () => setGridCapacity(autoGridCapacity(el.clientWidth, el.clientHeight));
+    const measure = () => {
+      const w = el.clientWidth;
+      setGridCapacity(autoGridCapacity(w, el.clientHeight));
+      setGridTile(autoGridTile(w));
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
@@ -1741,7 +1776,14 @@ export function App() {
         ) : (
           <section className="auto-stage" aria-label="帖子自动网格">
             <div className="auto-grid-wrap" ref={autoGridWrapRef}>
-              <ol className="feed-list auto-grid">
+              <ol
+                className={`feed-list auto-grid${gridTile.narrow ? " narrow" : ""}`}
+                style={gridTile.narrow ? {
+                  gridTemplateColumns: `repeat(${AUTO_GRID_NARROW_COLS}, minmax(0, 1fr))`,
+                  "--auto-card-h": `${gridTile.cardH}px`,
+                  "--auto-scale": String(gridTile.scale),
+                } as CSSProperties : undefined}
+              >
                 {autoGridItems.map((item) => (
                   <li className="note" key={item.id}>
                     <NoteCard item={item} profileCache={profileCache} incognito={incognitoMode} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
@@ -1806,7 +1848,7 @@ export function App() {
             <div className="help-body">
               <p>绿野仙踪是一个极简的 Nostr 帖子浏览器，从多个资讯源拉取公开帖子，去重后展示。你的私钥永远不会经过页面。</p>
               <h3>自动模式</h3>
-              <p>帖子按时间倒序铺成固定网格：新帖子进入第一排第一列，其余内容依次向右、向下顺移，最早的一条在最后一格。页面不滚动，也没有切换动画。</p>
+              <p>帖子按时间倒序铺成固定网格：新帖子进入第一排第一列，其余内容依次向右、向下顺移，最早的一条在最后一格。页面不滚动，也没有切换动画。手机等窄屏上会自动竖分三列、整块等比缩小，点小块进入详情。</p>
               <h3>手动模式</h3>
               <p>自由滚动浏览全部帖子，点「刷新」获取新帖子。浏览模式的选择会自动记住。</p>
               <h3>资讯源</h3>
