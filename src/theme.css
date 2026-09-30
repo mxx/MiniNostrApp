@@ -169,6 +169,7 @@ h2 { font-size: 24px; line-height: 1.08; }
 .status-dot.online { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
 .status-dot.connecting { background: var(--warning); animation: pulse 1.25s ease-in-out infinite; }
 .status-dot.offline { background: var(--danger); opacity: .7; }
+.relay-problem { grid-column: 1 / -1; align-self: start; margin: 0 0 10px; color: var(--danger); font-size: 12px; line-height: 1.5; }
 .trash-button { width: 40px; height: 40px; display: grid; place-items: center; border: 0; background: transparent; color: var(--dim); cursor: pointer; }
 .add-relay { margin-top: 22px; }
 .add-relay label, .composer-sheet label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 750; }
@@ -326,7 +327,8 @@ h2 { font-size: 24px; line-height: 1.08; }
   .composer-backdrop, .detail-backdrop { align-items: center; justify-content: center; padding: 24px; }
   .composer-sheet { width: min(560px, 100%); border-radius: 18px; padding: 26px; }
   .detail-sheet { width: min(620px, 100%); max-height: min(820px, calc(100vh - 48px)); border-radius: 18px; padding: 26px; }
-  .detail-sheet.longform-sheet { width: min(100%, max(780px, 33.333vw)); }
+  /* 长文详情至少不小于列表卡片宽度：1120px 是 .feed-column 最大宽度，48px 是其左右 padding。 */
+  .detail-sheet.longform-sheet { width: min(100%, max(33.333vw, calc(1120px - 48px))); }
 }
 
 

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { isNostrEvent, loadRelays, normalizeRelay, relativeTime, shortKey } from "../src/App";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { isNostrEvent, loadRelays, normalizeRelay, relativeTime, shortKey, describeRelayClose, isMixedContentBlocked } from "../src/App";
 import { installLocalStorageMock, makeEvent } from "./fixtures";
+
+const ROOT = join(import.meta.dir, "..");
 
 installLocalStorageMock();
 
@@ -105,5 +109,77 @@ describe("isNostrEvent", () => {
     expect(isNostrEvent(bad, 1)).toBe(false);
     expect(isNostrEvent(null, 1)).toBe(false);
     expect(isNostrEvent("str", 1)).toBe(false);
+  });
+});
+
+describe("isMixedContentBlocked", () => {
+  test("HTTPS 页面 + ws:// 会被拦截", () => {
+    expect(isMixedContentBlocked("ws://lulin.org", "https:")).toBe(true);
+  });
+  test("HTTPS 页面 + wss:// 不拦截", () => {
+    expect(isMixedContentBlocked("wss://relay.damus.io", "https:")).toBe(false);
+  });
+  test("HTTP 页面 + ws:// 不拦截", () => {
+    expect(isMixedContentBlocked("ws://lulin.org", "http:")).toBe(false);
+  });
+});
+
+describe("describeRelayClose", () => {
+  test("HTTPS 下 ws:// 从未连通 → 提示混合内容被拦截", () => {
+    const reason = describeRelayClose("ws://lulin.org", 1006, false, "https:");
+    expect(reason).toContain("混合内容");
+    expect(reason).toContain("wss://");
+  });
+  test("1006 从未连通 → 无法建立连接（被拒绝/不可达/超时）", () => {
+    const reason = describeRelayClose("wss://relay.damus.io", 1006, false, "https:");
+    expect(reason).toContain("无法建立连接");
+    expect(reason).toContain("1006");
+  });
+  test("1006 曾经连通过 → 连接异常中断", () => {
+    const reason = describeRelayClose("wss://relay.damus.io", 1006, true, "https:");
+    expect(reason).toContain("异常中断");
+  });
+  test("1015 → TLS 握手失败", () => {
+    expect(describeRelayClose("wss://x", 1015, false, "https:")).toContain("TLS");
+  });
+  test("1001 → 资讯源主动断开", () => {
+    expect(describeRelayClose("wss://x", 1001, true, "https:")).toContain("主动断开");
+  });
+  test("未知代码带上代码号", () => {
+    expect(describeRelayClose("wss://x", 1008, false, "https:")).toContain("1008");
+    expect(describeRelayClose("wss://x", 1008, true, "https:")).toContain("1008");
+  });
+  test("混合内容判断优先于 code 分类", () => {
+    // 即使 code 不是 1006，HTTPS+ws:// 未连通也是浏览器拦截
+    expect(describeRelayClose("ws://lulin.org", 1015, false, "https:")).toContain("混合内容");
+  });
+});
+
+describe("资讯源错误原因接线", () => {
+  const app = () => readFileSync(join(ROOT, "src/App.tsx"), "utf-8");
+  const css = () => readFileSync(join(ROOT, "src/theme.css"), "utf-8");
+
+  test("onclose 把 code/是否连通过交给 describeRelayClose", () => {
+    expect(app()).toContain("describeRelayClose(relay.url, event.code, opened.has(relay.url))");
+  });
+  test("15 秒握手超时判 offline 并写原因", () => {
+    expect(app()).toContain("连接超时（15 秒无响应）");
+  });
+  test("重连周期开始时清空旧原因", () => {
+    expect(app()).toContain("setRelayProblems({})");
+  });
+  test("面板渲染 relay-problem 原因行", () => {
+    expect(app()).toContain('className="relay-problem"');
+  });
+  test("样式定义了 .relay-problem 且跨整行", () => {
+    expect(css()).toContain(".relay-problem");
+    expect(css()).toContain("grid-column: 1 / -1");
+  });
+});
+
+describe("长文详情宽度", () => {
+  test("详情至少不小于列表卡片宽度（1120px feed 列宽 − 48px padding）", () => {
+    const css = readFileSync(join(ROOT, "src/theme.css"), "utf-8");
+    expect(css).toContain(".detail-sheet.longform-sheet { width: min(100%, max(33.333vw, calc(1120px - 48px))); }");
   });
 });

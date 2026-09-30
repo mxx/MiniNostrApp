@@ -820,6 +820,32 @@ function relayProtocol(url: string): "WS" | "WSS" {
   return url.startsWith("ws://") ? "WS" : "WSS";
 }
 
+/**
+ * 浏览器是否会拦截这个 ws:// 连接（HTTPS 页面中的混合内容）。
+ * pageProtocol 仅供测试注入；默认取当前页面的协议。
+ */
+export function isMixedContentBlocked(url: string, pageProtocol?: string): boolean {
+  const protocol = pageProtocol ?? (typeof window === "undefined" ? "" : window.location.protocol);
+  return protocol === "https:" && url.startsWith("ws://");
+}
+
+/**
+ * 把 WebSocket 关闭翻译成中文原因。
+ * 浏览器出于安全不暴露网络细节（拒绝 / DNS 失败 / 超时都表现为 code 1006），
+ * 只能按“是否曾经连通过”分类给出最可能的原因。
+ */
+export function describeRelayClose(url: string, code: number, hadOpened: boolean, pageProtocol?: string): string {
+  if (!hadOpened && isMixedContentBlocked(url, pageProtocol)) {
+    return "浏览器拦截了未加密的 ws:// 连接（混合内容）；HTTPS 页面只能连接 wss://";
+  }
+  if (code === 1006) {
+    return hadOpened ? "连接异常中断（1006）" : "无法建立连接：被拒绝、不可达或超时（1006）";
+  }
+  if (code === 1015) return "TLS 握手失败（1015）";
+  if (code === 1001) return "资讯源主动断开（1001）";
+  return `${hadOpened ? "连接关闭" : "连接失败"}（代码 ${code}）`;
+}
+
 const INLINE_TOKEN = /(https?:\/\/[^\s<]+|(?:nostr:)?(?:npub|note|nevent|nprofile|naddr)1[0-9a-z]+|#[\p{L}\p{N}_]+)/giu;
 const TRAILING_PUNCTUATION = /[.,!?，。！？;；:：)）\]}]+$/;
 
@@ -1008,6 +1034,7 @@ function NoteCard({ item, profileCache, incognito, onOpenProfile, onOpenNote, on
 export function App() {
   const [relays, setRelays] = useState<RelayConfig[]>(loadRelays);
   const [relayStates, setRelayStates] = useState<Record<string, RelayState>>({});
+  const [relayProblems, setRelayProblems] = useState<Record<string, string>>({});
   const [events, setEvents] = useState<NostrEvent[]>(loadCachedEvents);
   const [longforms, setLongforms] = useState<NostrEvent[]>(loadCachedLongforms);
   const [longformDetailId, setLongformDetailId] = useState<string | null>(null);
@@ -1379,7 +1406,11 @@ export function App() {
       const nextStates: Record<string, RelayState> = {};
       for (const relay of relays) nextStates[relay.url] = relay.enabled ? "connecting" : "offline";
       setRelayStates(nextStates);
+      setRelayProblems({});
       setNetworkMessage(active.length === 0 ? "请至少启用一个资讯源。" : "");
+
+      // 本轮连接中曾经成功打开过的资讯源（用于把关闭翻译成准确的原因）。
+      const opened = new Set<string>();
 
       for (const relay of active) {
         const subId = `feed-${createUuid().slice(0, 8)}`;
@@ -1387,7 +1418,23 @@ export function App() {
         try {
           const socket = new WebSocket(relay.url);
           socketsRef.current.set(relay.url, socket);
+          // 15 秒还没握手成功就判超时：浏览器不会自己报连接超时。
+          const connectTimer = window.setTimeout(() => {
+            if (socket.readyState === WebSocket.CONNECTING) {
+              setRelayStates((current) => ({ ...current, [relay.url]: "offline" }));
+              setRelayProblems((current) => ({ ...current, [relay.url]: "连接超时（15 秒无响应）" }));
+              socket.close();
+            }
+          }, 15000);
           socket.onopen = () => {
+            window.clearTimeout(connectTimer);
+            opened.add(relay.url);
+            setRelayProblems((current) => {
+              if (!(relay.url in current)) return current;
+              const next = { ...current };
+              delete next[relay.url];
+              return next;
+            });
             setRelayStates((current) => ({ ...current, [relay.url]: "online" }));
             socket.send(JSON.stringify(["REQ", subId, { kinds: [1], limit: 60 }]));
             socket.send(JSON.stringify(["REQ", longformSubId, { kinds: [LONGFORM_KIND], limit: LONGFORM_LIMIT }]));
@@ -1440,10 +1487,15 @@ export function App() {
               // Ignore malformed relay frames without interrupting the feed.
             }
           };
-          socket.onerror = () => setRelayStates((current) => ({ ...current, [relay.url]: "offline" }));
-          socket.onclose = () => setRelayStates((current) => ({ ...current, [relay.url]: "offline" }));
-        } catch {
+          // 注意：onerror 不携带错误细节（浏览器安全限制），关闭原因统一在 onclose 里按 code 分类。
+          socket.onclose = (event) => {
+            window.clearTimeout(connectTimer);
+            setRelayStates((current) => ({ ...current, [relay.url]: "offline" }));
+            setRelayProblems((current) => ({ ...current, [relay.url]: describeRelayClose(relay.url, event.code, opened.has(relay.url)) }));
+          };
+        } catch (error) {
           setRelayStates((current) => ({ ...current, [relay.url]: "offline" }));
+          setRelayProblems((current) => ({ ...current, [relay.url]: error instanceof Error ? `地址无效：${error.message}` : "地址无效" }));
         }
       }
     }, 500);
@@ -1726,8 +1778,11 @@ export function App() {
                     aria-label={`${relay.enabled ? "停用" : "启用"} ${relay.url}`}
                   ><span /></button>
                   <div className="relay-address"><strong>{relayLabel(relay.url)} <span className={`protocol-badge ${relayProtocol(relay.url) === "WS" ? "insecure" : ""}`}>{relayProtocol(relay.url)}</span></strong><code>{relay.url}</code></div>
-                  <span className={`status-dot ${relay.enabled ? relayStates[relay.url] ?? "connecting" : "offline"}`} aria-label={relay.enabled ? relayStates[relay.url] ?? "连接中" : "已停用"} />
+                  <span className={`status-dot ${relay.enabled ? relayStates[relay.url] ?? "connecting" : "offline"}`} aria-label={relay.enabled ? relayStates[relay.url] ?? "连接中" : "已停用"} title={relayProblems[relay.url] ?? ""} />
                   <button className="trash-button" onClick={() => setRelays((current) => current.filter((item) => item.url !== relay.url))} aria-label={`删除 ${relay.url}`}><Icon name="trash" /></button>
+                  {relayProblems[relay.url] && (
+                    <p className="relay-problem" role="status">{relayProblems[relay.url]}</p>
+                  )}
                 </li>
               ))}
             </ul>
@@ -1755,7 +1810,7 @@ export function App() {
               <h3>手动模式</h3>
               <p>自由滚动浏览全部帖子，点「刷新」获取新帖子。浏览模式的选择会自动记住。</p>
               <h3>资讯源</h3>
-              <p>点左上角的在线状态打开资讯源管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。</p>
+              <p>点左上角的在线状态打开资讯源管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。连接失败时会在该资讯源下方显示原因（如被浏览器拦截、超时等）。</p>
               <h3>发帖与回复</h3>
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
               <h3>关注</h3>
