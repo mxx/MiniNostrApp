@@ -4,16 +4,13 @@ import {
   AUTO_GRID_CARD_H,
   AUTO_GRID_CARD_MIN_W,
   AUTO_GRID_GAP,
-  AUTO_GRID_STEP_MS,
   autoGridCapacity,
   autoGridWindow,
   buildReplyTags,
   defaultUpdateEnv,
   forceAppUpdate,
   loadViewMode,
-  nextAutoHead,
   saveViewMode,
-  shouldResetAutoHead,
 } from "../src/App";
 import {
   APP_VERSION_PLACEHOLDER,
@@ -57,46 +54,31 @@ describe("自动网格数学（从左向右、从上向下推进）", () => {
     expect(autoGridCapacity(0, 0)).toEqual({ cols: 1, rows: 1, count: 1 });
   });
 
-  test("窗口：head=0 时最新 K 条在前（左上角最新）", () => {
-    expect(autoGridWindow(["a", "b", "c", "d", "e"], 0, 3)).toEqual(["a", "b", "c"]);
+  test("窗口始终保留最新 K 条，严格维持时间倒序", () => {
+    expect(autoGridWindow(["最新", "次新", "更早", "最早"], 3)).toEqual(["最新", "次新", "更早"]);
   });
 
-  test("窗口：head+1 整体向右下推进一格", () => {
-    expect(autoGridWindow(["a", "b", "c", "d", "e"], 1, 3)).toEqual(["b", "c", "d"]);
-    expect(autoGridWindow(["a", "b", "c", "d", "e"], 2, 3)).toEqual(["c", "d", "e"]);
+  test("新帖插入池首后进入左上角，其余帖子顺移", () => {
+    expect(autoGridWindow(["新帖", "最新", "次新", "更早"], 3)).toEqual(["新帖", "最新", "次新"]);
   });
 
-  test("窗口：池尾回绕到池首", () => {
-    expect(autoGridWindow(["a", "b", "c", "d", "e"], 4, 3)).toEqual(["e", "a", "b"]);
+  test("窗口不回绕，避免旧帖出现在新帖前面", () => {
+    expect(autoGridWindow(["a", "b", "c", "d", "e"], 3)).toEqual(["a", "b", "c"]);
   });
 
-  test("窗口：池子小于容量时全显，不回绕", () => {
-    expect(autoGridWindow(["a", "b"], 0, 6)).toEqual(["a", "b"]);
+  test("窗口：池子小于容量时全显", () => {
+    expect(autoGridWindow(["a", "b"], 6)).toEqual(["a", "b"]);
   });
 
   test("窗口：空池/零容量返回空", () => {
-    expect(autoGridWindow([], 0, 6)).toEqual([]);
-    expect(autoGridWindow(["a"], 0, 0)).toEqual([]);
-  });
-
-  test("单步：head 循环递增", () => {
-    expect(nextAutoHead(0, 5)).toBe(1);
-    expect(nextAutoHead(4, 5)).toBe(0);
-    expect(nextAutoHead(0, 0)).toBe(0);
-  });
-
-  test("新帖/筛选变化时 head 归零", () => {
-    expect(shouldResetAutoHead("a", "b")).toBe(true);
-    expect(shouldResetAutoHead(undefined, "a")).toBe(true);
-    expect(shouldResetAutoHead("a", "a")).toBe(false);
-    expect(shouldResetAutoHead(undefined, undefined)).toBe(false);
+    expect(autoGridWindow([], 6)).toEqual([]);
+    expect(autoGridWindow(["a"], 0)).toEqual([]);
   });
 
   test("常量合理：与 CSS 网格口径一致", () => {
     expect(AUTO_GRID_CARD_MIN_W).toBe(300);
     expect(AUTO_GRID_CARD_H).toBe(340);
     expect(AUTO_GRID_GAP).toBe(12);
-    expect(AUTO_GRID_STEP_MS).toBe(8000);
   });
 });
 
@@ -167,7 +149,6 @@ describe("自动网格样式（显示回归）", () => {
       "auto-grid",
       "app-version",
       "auto-bar",
-      "auto-pause",
       "auto-count",
       "auto-hint",
       "help-body",
@@ -184,15 +165,11 @@ describe("自动网格样式（显示回归）", () => {
 });
 
 describe("App 接线（自动网格 / 回复 / 帮助）", () => {
-  test("自动网格用 setInterval 推进", () => {
-    expect(appSrc).toContain("setInterval");
-    expect(appSrc).toContain("AUTO_GRID_STEP_MS");
-    expect(appSrc).toContain("nextAutoHead");
-  });
-
-  test("新帖到达时 head 归零（最新帖回左上角）", () => {
-    expect(appSrc).toContain("shouldResetAutoHead");
-    expect(appSrc).toContain("setAutoHead(0)");
+  test("自动网格不做定时轮换，始终按当前时间倒序窗口渲染", () => {
+    expect(appSrc).toContain("autoGridWindow(visibleEvents, gridCapacity.count)");
+    expect(appSrc).not.toContain("setInterval");
+    expect(appSrc).not.toContain("AUTO_GRID_STEP_MS");
+    expect(appSrc).not.toContain("autoHead");
   });
 
   test("网格容量随舞台尺寸自适应（ResizeObserver）", () => {
@@ -205,16 +182,6 @@ describe("App 接线（自动网格 / 回复 / 帮助）", () => {
     expect(appSrc).toContain("publishNote(content,");
   });
 
-  test("悬停暂停自动推进", () => {
-    expect(appSrc).toContain("onMouseEnter");
-    expect(appSrc).toContain("setAutoPaused(true)");
-    expect(appSrc).toContain("setAutoPaused(false)");
-  });
-
-  test("弹窗打开或减少动态时不推进", () => {
-    expect(appSrc).toContain("modalOpen");
-    expect(appSrc).toContain("prefers-reduced-motion");
-  });
 
   test("手动模式冻结快照，只有刷新按钮主动更新", () => {
     expect(appSrc).toContain("const [manualEvents, setManualEvents]");
@@ -348,8 +315,8 @@ describe("帮助弹窗", () => {
     }
   });
 
-  test("帮助打开时自动推进暂停（计入 modalOpen）", () => {
-    expect(appSrc).toContain("|| helpOpen");
+  test("帮助正文准确说明自动网格不滚动、无动画", () => {
+    expect(appSrc).toContain("页面不滚动，也没有切换动画");
   });
 
   test("帮助正文样式存在", () => {

@@ -113,7 +113,7 @@ export function saveCachedEvents(events: NostrEvent[]): void {
   }
 }
 
-// ---- 浏览模式：自动跑马灯 / 手动 ----
+// ---- 浏览模式：自动网格 / 手动 ----
 
 export type ViewMode = "auto" | "manual";
 
@@ -125,9 +125,6 @@ export const AUTO_GRID_CARD_MIN_W = 300;
 export const AUTO_GRID_CARD_H = 340;
 /** 自动网格：卡片间距（px），必须与 .feed-list 的 gap 一致。 */
 export const AUTO_GRID_GAP = 12;
-/** 自动网格：每隔多少毫秒整体向前推进一格（从左向右、从上向下）。 */
-export const AUTO_GRID_STEP_MS = 8000;
-
 /**
  * 按舞台实际尺寸算出能完整放下的列数/行数。
  * 列数公式与 .feed-list 的 auto-fill 口径一致，避免渲染出放不下的半行。
@@ -139,29 +136,13 @@ export function autoGridCapacity(stageW: number, stageH: number): { cols: number
 }
 
 /**
- * 取自动网格当前窗口：items 为时间倒序（最新在前），head 为左上角卡片下标；
- * 窗口按从左向右、从上向下铺满，超出池尾时从池首回绕。
+ * 自动网格始终取时间倒序列表的前 count 条：最新帖在左上角，其余帖子按
+ * 从左到右、从上到下顺排，最早的一条位于最后一个已占用格。新帖到达时
+ * React 直接重排整个窗口，不播放动画，也不会循环回绕破坏时间顺序。
  */
-export function autoGridWindow<T>(items: T[], head: number, count: number): T[] {
+export function autoGridWindow<T>(items: T[], count: number): T[] {
   if (items.length === 0 || count <= 0) return [];
-  if (items.length <= count) return items.slice();
-  const start = ((head % items.length) + items.length) % items.length;
-  const out: T[] = [];
-  for (let i = 0; i < count; i++) out.push(items[(start + i) % items.length] as T);
-  return out;
-}
-
-/** 自动网格单步推进：head + 1，整张网格的内容向右下方移动一格。 */
-export function nextAutoHead(head: number, length: number): number {
-  return length <= 0 ? 0 : (head + 1) % length;
-}
-
-/**
- * 池首 id 变化（新帖到达或筛选改变）时返回 true，
- * 调用方据此把 head 归零，让最新帖回到第一排第一列。
- */
-export function shouldResetAutoHead(prevFirstId: string | undefined, nextFirstId: string | undefined): boolean {
-  return prevFirstId !== nextFirstId;
+  return items.slice(0, count);
 }
 
 declare const __APP_VERSION__: string | undefined;
@@ -491,7 +472,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "play" | "pause" | "download" | "help" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "download" | "help" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -500,8 +481,6 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "close") return <svg {...common}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   if (name === "plus") return <svg {...common}><path d="M12 5v14M5 12h14"/></svg>;
   if (name === "reply") return <svg {...common}><path d="M8 7 3 12l5 5"/><path d="M3 12h11a7 7 0 0 1 7 7v1"/></svg>;
-  if (name === "play") return <svg {...common}><path d="m8 5 11 7-11 7Z"/></svg>;
-  if (name === "pause") return <svg {...common}><path d="M9 5v14M15 5v14"/></svg>;
   if (name === "download") return <svg {...common}><path d="M12 4v10"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>;
   if (name === "help") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1.1.9-1.1 1.9"/><path d="M12 17h.01"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
@@ -525,7 +504,7 @@ function ClampedNote({ content }: { content: string }) {
   );
 }
 
-/** 帖子卡片的共享主体：手动网格与自动轮播共用，页脚带回复按钮。 */
+/** 帖子卡片的共享主体：手动网格与自动网格共用，页脚带回复按钮。 */
 function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
   item: NostrEvent;
   profileCache: Record<string, ProfileEntry>;
@@ -582,13 +561,6 @@ export function App() {
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   const [manualEvents, setManualEvents] = useState<NostrEvent[]>(() => loadCachedEvents());
-  const [autoPaused, setAutoPaused] = useState(false);
-  const [reducedMotion] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
   const publishAcksRef = useRef<Map<string, Set<string>>>(new Map());
@@ -624,23 +596,11 @@ export function App() {
   const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
   const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
   const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
-  const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen || helpOpen;
-  const autoAdvancePaused = autoPaused || modalOpen || reducedMotion;
 
-  // 自动网格：head 为左上角卡片在 visibleEvents（时间倒序）中的下标。
-  // 每 AUTO_GRID_STEP_MS 推进一格，整张网格的内容向右下方移动一格，
-  // 无动画，直接替换。池首变化（新帖/筛选）时 head 归零，最新帖回到左上角。
-  const [autoHead, setAutoHead] = useState(0);
+  // 自动网格保持严格时间倒序：最新在左上角，之后从左到右、从上到下。
+  // 视口只显示能完整容纳的格数；新帖到达时列表原地重排，不做动画或循环轮换。
   const [gridCapacity, setGridCapacity] = useState(() => autoGridCapacity(960, 700));
   const autoGridWrapRef = useRef<HTMLDivElement | null>(null);
-  const poolLengthRef = useRef(visibleEvents.length);
-  poolLengthRef.current = visibleEvents.length;
-  const autoPoolKey = `${feedTab}::${visibleEvents[0]?.id ?? ""}`;
-  const prevAutoPoolKeyRef = useRef(autoPoolKey);
-  if (shouldResetAutoHead(prevAutoPoolKeyRef.current, autoPoolKey)) {
-    prevAutoPoolKeyRef.current = autoPoolKey;
-    setAutoHead(0);
-  }
   useEffect(() => {
     if (viewMode !== "auto") return;
     const el = autoGridWrapRef.current;
@@ -651,14 +611,7 @@ export function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [viewMode]);
-  useEffect(() => {
-    if (viewMode !== "auto" || autoAdvancePaused) return;
-    const timer = setInterval(() => {
-      setAutoHead((head) => nextAutoHead(head, poolLengthRef.current));
-    }, AUTO_GRID_STEP_MS);
-    return () => clearInterval(timer);
-  }, [viewMode, autoAdvancePaused]);
-  const autoGridItems = autoGridWindow(visibleEvents, autoHead, gridCapacity.count);
+  const autoGridItems = autoGridWindow(visibleEvents, gridCapacity.count);
 
 
   // 浏览模式持久化；切到手动模式时冻结当前快照。
@@ -1054,12 +1007,7 @@ export function App() {
             ))}
           </ol>
         ) : (
-          <section
-            className={`auto-stage${autoAdvancePaused ? " paused" : ""}`}
-            aria-label="帖子自动网格"
-            onMouseEnter={() => setAutoPaused(true)}
-            onMouseLeave={() => setAutoPaused(false)}
-          >
+          <section className="auto-stage" aria-label="帖子自动网格">
             <div className="auto-grid-wrap" ref={autoGridWrapRef}>
               <ol className="feed-list auto-grid">
                 {autoGridItems.map((item) => (
@@ -1070,11 +1018,8 @@ export function App() {
               </ol>
             </div>
             <div className="auto-bar">
-              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续自动轮播" : "暂停自动轮播"}>
-                <Icon name={autoPaused ? "play" : "pause"} />
-              </button>
               <span className="auto-count">{visibleEvents.length} 条帖子</span>
-              <span className="auto-hint">悬停暂停 · 新帖进入左上角</span>
+              <span className="auto-hint">新帖自动进入左上角</span>
             </div>
           </section>
         )}
@@ -1126,7 +1071,7 @@ export function App() {
             <div className="help-body">
               <p>绿野仙踪是一个极简的 Nostr 帖子浏览器，从多个资讯源拉取公开帖子，去重后展示。你的私钥永远不会经过页面。</p>
               <h3>自动模式</h3>
-              <p>帖子以网格自动轮播：每 8 秒整体向右下方推进一格，新帖子会出现在第一排第一列。把鼠标悬停在帖子区、或点暂停按钮可以停住；打开弹窗时也会自动暂停。</p>
+              <p>帖子按时间倒序铺成固定网格：新帖子进入第一排第一列，其余内容依次向右、向下顺移，最早的一条在最后一格。页面不滚动，也没有切换动画。</p>
               <h3>手动模式</h3>
               <p>自由滚动浏览全部帖子，点「刷新」获取新帖子。浏览模式的选择会自动记住。</p>
               <h3>资讯源</h3>
