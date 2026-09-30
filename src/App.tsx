@@ -113,6 +113,49 @@ export function saveCachedEvents(events: NostrEvent[]): void {
   }
 }
 
+// ---- 浏览模式：自动轮播 / 手动 ----
+
+export type ViewMode = "auto" | "manual";
+
+const VIEW_MODE_STORAGE_KEY = "nostr-min-view-mode-v1";
+
+/** 自动轮播：每张帖子停留多久（毫秒）；进入动画从左上、退出动画向右下挤出。 */
+export const AUTO_ADVANCE_MS = 8000;
+/** 退出动画时长（毫秒），必须小于 AUTO_ADVANCE_MS。 */
+export const AUTO_EXIT_MS = 450;
+
+export function loadViewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "manual" ? "manual" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+export function saveViewMode(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+  } catch {
+    // private mode — keep the choice in memory only
+  }
+}
+
+/** 自动轮播的下一张序号：越界/非法输入一律回到开头。 */
+export function nextAutoIndex(current: number, length: number): number {
+  if (length <= 0) return 0;
+  if (!Number.isInteger(current) || current < 0 || current >= length) return 0;
+  return (current + 1) % length;
+}
+
+/** NIP-10 回复标签：e 标签带中继提示与 reply 标记，p 标签指向原作者。 */
+export function buildReplyTags(parent: { id: string; pubkey: string; relays: string[] }): string[][] {
+  const hint = parent.relays.find((relay) => relay.startsWith("ws")) ?? "";
+  return [
+    ["e", parent.id, hint, "reply"],
+    ["p", parent.pubkey],
+  ];
+}
+
 function createUuid(): string {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
 
@@ -368,7 +411,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -376,6 +419,7 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "key") return <svg {...common}><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M15 8l2 2M17 6l2 2"/></svg>;
   if (name === "close") return <svg {...common}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   if (name === "plus") return <svg {...common}><path d="M12 5v14M5 12h14"/></svg>;
+  if (name === "reply") return <svg {...common}><path d="M8 7 3 12l5 5"/><path d="M3 12h11a7 7 0 0 1 7 7v1"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
@@ -397,6 +441,38 @@ function ClampedNote({ content }: { content: string }) {
         <FormattedNote content={content} />
       </div>
       {clamped && <span className="expand-hint">内容较长，点击展开全文 →</span>}
+    </>
+  );
+}
+
+/** 帖子卡片的共享主体：手动网格与自动轮播共用，页脚带回复按钮。 */
+function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
+  item: NostrEvent;
+  profileCache: Record<string, ProfileEntry>;
+  onOpenProfile: (pubkey: string) => void;
+  onOpenNote: (eventId: string) => void;
+  onReply: (item: NostrEvent) => void;
+}) {
+  const picture = profilePicture(item.pubkey, profileCache);
+  return (
+    <>
+      <div className="note-meta">
+        <button className="avatar-mark" onClick={() => onOpenProfile(item.pubkey)} aria-label={`查看作者 ${profileName(item.pubkey, profileCache)}`}>
+          {picture ? <AvatarImg picture={picture} label="" /> : item.pubkey.slice(0, 2).toUpperCase()}
+        </button>
+        <button className="author" onClick={() => onOpenProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
+        <time dateTime={new Date(item.created_at * 1000).toISOString()}>{relativeTime(item.created_at)}</time>
+      </div>
+      <button className="note-open" onClick={() => onOpenNote(item.id)} aria-label={`查看帖子 ${shortKey(encodeNip19("note", item.id))}`}>
+        <ClampedNote content={item.content} />
+      </button>
+      <div className="note-footer">
+        <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个中继`}</span>
+        <span className="note-actions">
+          <button className="reply-button" onClick={() => onReply(item)} aria-label={`回复 ${profileName(item.pubkey, profileCache)}`}><Icon name="reply" />回复</button>
+          <button className="view-detail" onClick={() => onOpenNote(item.id)}>查看详情 →</button>
+        </span>
+      </div>
     </>
   );
 }
@@ -423,6 +499,11 @@ export function App() {
   const [feedTab, setFeedTab] = useState<"all" | "following">("all");
   const [followsOpen, setFollowsOpen] = useState(false);
   const [followMessage, setFollowMessage] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
+  const [autoIndex, setAutoIndex] = useState(0);
+  const [autoPhase, setAutoPhase] = useState<"enter" | "exit">("enter");
+  const [autoPaused, setAutoPaused] = useState(false);
+  const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
   const publishAcksRef = useRef<Map<string, Set<string>>>(new Map());
   const profileSubsRef = useRef<Set<string>>(new Set());
@@ -454,6 +535,44 @@ export function App() {
   const detailEvent = detailEventId ? events.find((event) => event.id === detailEventId) ?? null : null;
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
   const visibleEvents = feedTab === "following" ? events.filter((event) => follows.includes(event.pubkey)) : events;
+  const safeAutoIndex = autoIndex < visibleEvents.length ? autoIndex : 0;
+  const currentAuto = visibleEvents[safeAutoIndex] ?? null;
+  const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen;
+
+  // 浏览模式持久化；切换模式或筛选页签时轮播回到第一张。
+  useEffect(() => {
+    saveViewMode(viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    setAutoIndex(0);
+    setAutoPhase("enter");
+  }, [viewMode, feedTab]);
+
+  // 自动刷新：列表头部出现新帖子时，轮播跳到最新一张。
+  const headIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const head = visibleEvents[0]?.id ?? null;
+    if (headIdRef.current !== null && head !== null && head !== headIdRef.current && viewMode === "auto") {
+      setAutoIndex(0);
+      setAutoPhase("enter");
+    }
+    headIdRef.current = head;
+  }, [visibleEvents, viewMode]);
+
+  // 自动轮播：停留 AUTO_ADVANCE_MS 后先播出场动画，再切到下一张播入场动画。
+  // 暂停、弹窗打开或无内容时不推进；鼠标悬停卡片也会暂停（见 auto-stage）。
+  useEffect(() => {
+    if (viewMode !== "auto" || autoPaused || modalOpen || visibleEvents.length === 0) return;
+    const advanceTimer = window.setTimeout(() => {
+      setAutoPhase("exit");
+      window.setTimeout(() => {
+        setAutoIndex((index) => nextAutoIndex(index, visibleEvents.length));
+        setAutoPhase("enter");
+      }, AUTO_EXIT_MS);
+    }, AUTO_ADVANCE_MS);
+    return () => window.clearTimeout(advanceTimer);
+  }, [viewMode, autoPaused, modalOpen, autoIndex, autoPhase, visibleEvents.length]);
   const profileEntry = profilePubkey ? profileCache[profilePubkey] : undefined;
   const profileDetail = profileEntry?.profile;
   const isFollowing = profilePubkey ? follows.includes(profilePubkey) : false;
@@ -652,23 +771,21 @@ export function App() {
     }
   }
 
-  async function publish(event: FormEvent) {
-    event.preventDefault();
-    const content = draft.trim();
-    if (!content) return;
+  /** 签名并发布一条 kind-1 帖子；tags 为空是普通帖子，带 e/p 标签即为回复。 */
+  async function publishNote(content: string, tags: string[][]): Promise<boolean> {
     setSignerError("");
     const currentPubkey = pubkey ?? await connectSigner();
-    if (!currentPubkey || !window.nostr) return;
+    if (!currentPubkey || !window.nostr) return false;
     const liveSockets = [...socketsRef.current.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
     if (liveSockets.length === 0) {
       setNetworkMessage("当前没有在线中继，无法发布。请检查中继面板后重试。");
-      return;
+      return false;
     }
     try {
       const signed = await window.nostr.signEvent({
         kind: 1,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [],
+        tags,
         content,
       });
       if (!isNostrEvent(signed, 1)) throw new Error("invalid signed event");
@@ -676,11 +793,31 @@ export function App() {
       setPublishStatus({ eventId: signed.id, total: liveSockets.length, accepted: 0, rejected: 0, pending: liveSockets.length });
       setEvents((current) => [{ ...signed, relays: ["本地发布"] }, ...current.filter((item) => item.id !== signed.id)].slice(0, MAX_EVENTS));
       for (const [, socket] of liveSockets) socket.send(JSON.stringify(["EVENT", signed]));
-      setDraft("");
-      setComposerOpen(false);
+      return true;
     } catch {
       setSignerError("签名未完成，帖子没有发送。");
+      return false;
     }
+  }
+
+  async function publish(event: FormEvent) {
+    event.preventDefault();
+    const content = draft.trim();
+    if (!content) return;
+    const target = replyTarget;
+    const ok = await publishNote(content, target ? buildReplyTags(target) : []);
+    if (!ok) return;
+    setDraft("");
+    setComposerOpen(false);
+    setReplyTarget(null);
+  }
+
+  function openReply(item: NostrEvent) {
+    setDetailEventId(null);
+    setProfilePubkey(null);
+    setReplyTarget(item);
+    setDraft("");
+    setComposerOpen(true);
   }
 
   async function toggleFollow(target: string) {
@@ -763,7 +900,7 @@ export function App() {
             <p className="section-index">PUBLIC NOTES / KIND 1</p>
             <h1 id="feed-heading">最新帖子</h1>
           </div>
-          <button className="compose-button desktop-compose" onClick={() => setComposerOpen(true)}><Icon name="edit" />发帖子</button>
+          <button className="compose-button desktop-compose" onClick={() => { setReplyTarget(null); setDraft(""); setComposerOpen(true); }}><Icon name="edit" />发帖子</button>
         </section>
 
         {networkMessage && <div className="inline-notice" role="status">{networkMessage}</div>}
@@ -783,6 +920,10 @@ export function App() {
           {feedTab === "following" && follows.length > 0 && (
             <button className="manage-follows" onClick={() => setFollowsOpen(true)}>管理关注</button>
           )}
+          <div className="view-switch" role="group" aria-label="浏览模式">
+            <button className={`view-option${viewMode === "auto" ? " active" : ""}`} aria-pressed={viewMode === "auto"} onClick={() => setViewMode("auto")}>自动</button>
+            <button className={`view-option${viewMode === "manual" ? " active" : ""}`} aria-pressed={viewMode === "manual"} onClick={() => setViewMode("manual")}>手动</button>
+          </div>
         </div>
 
         {visibleEvents.length === 0 ? (
@@ -794,34 +935,42 @@ export function App() {
               {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? "重新订阅" : "管理中继"}
             </button>
           </section>
-        ) : (
+        ) : viewMode === "manual" ? (
           <ol className="feed-list" aria-live="polite">
-            {visibleEvents.map((item) => {
-              const picture = profilePicture(item.pubkey, profileCache);
-              return (
+            {visibleEvents.map((item) => (
               <li className="note" key={item.id}>
-                <div className="note-meta">
-                  <button className="avatar-mark" onClick={() => openProfile(item.pubkey)} aria-label={`查看作者 ${profileName(item.pubkey, profileCache)}`}>
-                    {picture ? <AvatarImg picture={picture} label="" /> : item.pubkey.slice(0, 2).toUpperCase()}
-                  </button>
-                  <button className="author" onClick={() => openProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
-                  <time dateTime={new Date(item.created_at * 1000).toISOString()}>{relativeTime(item.created_at)}</time>
-                </div>
-                <button className="note-open" onClick={() => openNote(item.id)} aria-label={`查看帖子 ${shortKey(encodeNip19("note", item.id))}`}>
-                  <ClampedNote content={item.content} />
-                  <div className="note-footer">
-                    <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个中继`}</span>
-                    <span className="view-detail">查看详情 →</span>
-                  </div>
-                </button>
+                <NoteCard item={item} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
               </li>
-              );
-            })}
+            ))}
           </ol>
+        ) : (
+          <section
+            className={`auto-stage${autoPaused ? " paused" : ""}`}
+            aria-live="polite"
+            aria-label="帖子自动轮播"
+            onMouseEnter={() => setAutoPaused(true)}
+            onMouseLeave={() => setAutoPaused(false)}
+          >
+            {currentAuto && (
+              <article key={currentAuto.id} className={`note auto-note ${autoPhase === "exit" ? "auto-exit" : "auto-enter"}`}>
+                <NoteCard item={currentAuto} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
+              </article>
+            )}
+            <div className="auto-bar">
+              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续自动轮播" : "暂停自动轮播"}>
+                {autoPaused ? "▶" : "⏸"}
+              </button>
+              <span className="auto-count">{safeAutoIndex + 1} / {visibleEvents.length}</span>
+              <span className="auto-hint">悬停暂停 · 新帖自动刷新</span>
+            </div>
+            <div className="auto-progress" aria-hidden="true">
+              <i key={currentAuto?.id ?? "none"} style={{ animationDuration: `${AUTO_ADVANCE_MS}ms` }} />
+            </div>
+          </section>
         )}
       </main>
 
-      <button className="compose-fab" onClick={() => setComposerOpen(true)} aria-label="发帖子"><Icon name="edit" /></button>
+      <button className="compose-fab" onClick={() => { setReplyTarget(null); setDraft(""); setComposerOpen(true); }} aria-label="发帖子"><Icon name="edit" /></button>
 
       {panelOpen && (
         <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPanelOpen(false); }}>
@@ -858,12 +1007,19 @@ export function App() {
       )}
 
       {composerOpen && (
-        <div className="sheet-backdrop composer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setComposerOpen(false); }}>
+        <div className="sheet-backdrop composer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setComposerOpen(false); setReplyTarget(null); } }}>
           <section className="composer-sheet" role="dialog" aria-modal="true" aria-labelledby="composer-title">
             <div className="sheet-heading">
-              <div><p className="section-index">SIGNED NOTE</p><h2 id="composer-title">发一条帖子</h2></div>
-              <button className="icon-button" onClick={() => setComposerOpen(false)} aria-label="关闭发布器"><Icon name="close" /></button>
+              <div><p className="section-index">{replyTarget ? "REPLY" : "SIGNED NOTE"}</p><h2 id="composer-title">{replyTarget ? "回复帖子" : "发一条帖子"}</h2></div>
+              <button className="icon-button" onClick={() => { setComposerOpen(false); setReplyTarget(null); }} aria-label="关闭发布器"><Icon name="close" /></button>
             </div>
+            {replyTarget && (
+              <div className="reply-context">
+                <span className="reply-context-label">回复 {profileName(replyTarget.pubkey, profileCache)}</span>
+                <p>{replyTarget.content.trim().slice(0, 140) || "（空文本）"}</p>
+                <button className="reply-context-cancel" onClick={() => setReplyTarget(null)}>改为发普通帖子</button>
+              </div>
+            )}
             <form onSubmit={(event) => void publish(event)}>
               <label htmlFor="post-content">帖子内容</label>
               <textarea id="post-content" value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={4000} autoFocus placeholder="写点什么…" />
@@ -896,6 +1052,9 @@ export function App() {
               <div><dt>事件 ID</dt><dd><code>{encodeNip19("note", detailEvent.id)}</code><button onClick={() => void copyValue(encodeNip19("note", detailEvent.id), "事件 ID")}>复制</button></dd></div>
               <div><dt>作者公钥</dt><dd><code>{encodeNip19("npub", detailEvent.pubkey)}</code><button onClick={() => void copyValue(encodeNip19("npub", detailEvent.pubkey), "作者公钥")}>复制</button></dd></div>
             </dl>
+            <div className="detail-actions">
+              <button className="reply-button" onClick={() => openReply(detailEvent)}><Icon name="reply" />回复这条帖子</button>
+            </div>
             {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
           </article>
         </div>

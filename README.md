@@ -12,6 +12,8 @@
 - 支持 `ws://` 和 `wss://`（HTTP 页面下无 mixed content 限制）
 - 默认 relay：`ws://lulin.org`、`wss://relay.gulugulu.moe`、`wss://relay-jp.nostr.wirednet.jp`、`wss://relay.nostr.wirednet.jp`
 - 等尺寸卡片网格：帖子按统一大小 box 排列，长内容自动折叠并提示，点击展开全文
+- 浏览模式：**自动**（默认）单张轮播——左上进入、右下挤出动画，无滚动，新帖自动刷新，悬停/弹窗时暂停；**手动**——等尺寸网格，滚动浏览，右上角按钮手动刷新
+- 回复：卡片与详情页的「回复」按钮，按 NIP-10 生成 `e`（带中继提示 + reply 标记）/`p` 标签，经 NIP-07 签名发布
 - 用户 profile：拉取 kind-0 资料（名字/头像/简介），按 profile 显示作者
 - 关注：kind-3 联系人列表读取与编辑（需 NIP-07 签名器），未连接时本地保存
 - 离线可用：Service Worker 缓存 app shell，帖子 feed 持久化到 localStorage，断网/重启浏览器后无需重新下载即可打开
