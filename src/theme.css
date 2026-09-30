@@ -217,6 +217,12 @@ h2 { font-size: 24px; line-height: 1.08; }
 .longform-cover-hint { margin: 18px 0 0; font-size: 13px; }
 .longform-cover-hint a { color: var(--accent); font-weight: 700; }
 .longform-body { padding: 18px 0 6px; overflow-wrap: anywhere; font-size: 16.5px; line-height: 1.75; }
+/* 长文详情：标题区收紧，正文区放大 */
+.longform-sheet .sheet-heading { gap: 10px; }
+.longform-sheet .sheet-heading h2 { margin: 0; font-size: 19px; line-height: 1.35; letter-spacing: -0.01em; }
+.longform-sheet .section-index { margin-bottom: 3px; }
+.longform-sheet .detail-author { margin-top: 12px; padding: 8px 0; }
+.longform-sheet .longform-body { padding-top: 12px; }
 .longform-body > :first-child { margin-top: 0; }
 .longform-body > :last-child { margin-bottom: 0; }
 .longform-body h1, .longform-body h2, .longform-body h3, .longform-body h4 { margin: 1.4em 0 0.6em; letter-spacing: -0.015em; line-height: 1.35; }
@@ -315,6 +321,7 @@ h2 { font-size: 24px; line-height: 1.08; }
   .composer-backdrop, .detail-backdrop { align-items: center; justify-content: center; padding: 24px; }
   .composer-sheet { width: min(560px, 100%); border-radius: 18px; padding: 26px; }
   .detail-sheet { width: min(620px, 100%); max-height: min(820px, calc(100vh - 48px)); border-radius: 18px; padding: 26px; }
+  .detail-sheet.longform-sheet { width: min(780px, 100%); }
 }
 
 

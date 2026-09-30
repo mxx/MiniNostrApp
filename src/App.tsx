@@ -1868,7 +1868,7 @@ export function App() {
 
       {longformDetail && longformDetailMeta && (
         <div className="sheet-backdrop detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setLongformDetailId(null); }}>
-          <article className="detail-sheet" role="dialog" aria-modal="true" aria-labelledby="longform-detail-title">
+          <article className="detail-sheet longform-sheet" role="dialog" aria-modal="true" aria-labelledby="longform-detail-title">
             <div className="sheet-heading">
               <div><p className="section-index">KIND 30023 LONGFORM</p><h2 id="longform-detail-title">{longformDetailMeta.title || "长文"}</h2></div>
               <button className="icon-button" onClick={() => setLongformDetailId(null)} aria-label="关闭长文"><Icon name="close" /></button>
