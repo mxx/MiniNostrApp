@@ -11,8 +11,42 @@
 - relay 面板：运行时添加/删除/开关，在线状态显示
 - 支持 `ws://` 和 `wss://`（HTTP 页面下无 mixed content 限制）
 - 默认 relay：`ws://lulin.org`、`wss://relay.gulugulu.moe`、`wss://relay-jp.nostr.wirednet.jp`、`wss://relay.nostr.wirednet.jp`
+- 等尺寸卡片网格：帖子按统一大小 box 排列，长内容自动折叠并提示，点击展开全文
+- 用户 profile：拉取 kind-0 资料（名字/头像/简介），按 profile 显示作者
+- 关注：kind-3 联系人列表读取与编辑（需 NIP-07 签名器），未连接时本地保存
 
 ## 本地运行
+
+```bash
+# 构建（需要 node）
+node build.mjs
+
+# 预览
+npx serve dist
+```
+
+构建产物在 `dist/`，直接丢到任何静态文件服务器即可。
+
+## 测试
+
+```bash
+cd ~/workspace/ts-spaces/nostr-2/client
+bun test                  # 单元测试 + 回归测试（含显示交叉检查）
+../node_modules/.bin/tsc --noEmit -p tsconfig.json   # 类型检查
+```
+
+- `test/`：测试夹具（`fixtures.ts`）+ 测试用例，`bun test` 运行。
+- `test/styles.test.ts`：显示回归检查 —— 设计 token 完整性、App.tsx 引用的 CSS 类都有定义、等尺寸卡片网格布局不变量。
+- 每次 bug 修复 / 功能修改都必须同步补充单元测试。
+
+## 发布流程
+
+发布必须走 `scripts/release.sh`，它强制门禁：**全部测试 + 类型检查通过 → 工作区干净 → 与远端一致 → 才 push**。任何一步失败都不会推送。
+
+```bash
+scripts/release.sh           # 全流程发布
+scripts/release.sh --check  # 只跑测试+类型检查，不推送
+```
 
 ```bash
 # 构建（需要 node）
