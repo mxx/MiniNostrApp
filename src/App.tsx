@@ -208,6 +208,25 @@ export function saveViewMode(mode: ViewMode): void {
   }
 }
 
+const INCOGNITO_MODE_STORAGE_KEY = "nostr-min-incognito-v1";
+
+/** 隐身模式：true = 不自动加载远程头像；缺省 false（普通模式，自动加载）。 */
+export function loadIncognitoMode(): boolean {
+  try {
+    return localStorage.getItem(INCOGNITO_MODE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveIncognitoMode(enabled: boolean): void {
+  try {
+    localStorage.setItem(INCOGNITO_MODE_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // private mode — keep the choice in memory only
+  }
+}
+
 /** NIP-10 回复标签：e 标签带资讯源提示与 reply 标记，p 标签指向原作者。 */
 export function buildReplyTags(parent: { id: string; pubkey: string; relays: string[] }): string[][] {
   const hint = parent.relays.find((relay) => relay.startsWith("ws")) ?? "";
@@ -374,6 +393,20 @@ export function profilePicture(pubkey: string, cache: Record<string, ProfileEntr
   return cache[pubkey]?.profile.picture;
 }
 
+export type AvatarDisplay = { kind: "image"; src: string } | { kind: "initials" };
+
+/**
+ * 头像展示决策：隐身模式下永远不自动加载远程头像；普通模式仅当资料里有
+ * 合法 http(s) 头像地址时才加载，否则显示首字母。
+ */
+export function avatarDisplay(pubkey: string, cache: Record<string, ProfileEntry>, incognito: boolean): AvatarDisplay {
+  if (!incognito) {
+    const picture = cache[pubkey]?.profile.picture;
+    if (picture && /^https?:\/\//i.test(picture)) return { kind: "image", src: picture };
+  }
+  return { kind: "initials" };
+}
+
 /** Merge a new follow set into an existing kind-3 tag list: keep non-p tags, replace p tags. */
 export function mergeContactTags(existing: string[][] | undefined, follows: string[]): string[][] {
   const kept = (existing ?? []).filter((tag) => tag[0] !== "p" && typeof tag[0] === "string");
@@ -472,7 +505,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "download" | "help" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "download" | "help" | "incognito" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -483,6 +516,7 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "reply") return <svg {...common}><path d="M8 7 3 12l5 5"/><path d="M3 12h11a7 7 0 0 1 7 7v1"/></svg>;
   if (name === "download") return <svg {...common}><path d="M12 4v10"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>;
   if (name === "help") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1.1.9-1.1 1.9"/><path d="M12 17h.01"/></svg>;
+  if (name === "incognito") return <svg {...common}><path d="M3 3l18 18"/><path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c7 0 10 7 10 7a17 17 0 0 1-2.9 3.9"/><path d="M6.6 6.6A16.5 16.5 0 0 0 2 12s3 7 10 7c1.5 0 2.9-.3 4.1-.8"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
@@ -504,10 +538,29 @@ function ClampedNote({ content }: { content: string }) {
   );
 }
 
+/** 远程头像展示：隐身模式只显示首字母，普通模式自动加载资料头像。 */
+function AvatarMark({ pubkey, profileCache, incognito, large, onClick, ariaLabel }: {
+  pubkey: string;
+  profileCache: Record<string, ProfileEntry>;
+  incognito: boolean;
+  large?: boolean;
+  onClick?: () => void;
+  ariaLabel?: string;
+}) {
+  const display = avatarDisplay(pubkey, profileCache, incognito);
+  const inner = display.kind === "image"
+    ? <img src={display.src} alt="" loading="lazy" referrerPolicy="no-referrer" />
+    : <>{pubkey.slice(0, 2).toUpperCase()}</>;
+  const className = `avatar-mark${large ? " large-avatar" : ""}`;
+  if (onClick) return <button className={className} onClick={onClick} aria-label={ariaLabel}>{inner}</button>;
+  return <span className={className}>{inner}</span>;
+}
+
 /** 帖子卡片的共享主体：手动网格与自动网格共用，页脚带回复按钮。 */
-function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
+function NoteCard({ item, profileCache, incognito, onOpenProfile, onOpenNote, onReply }: {
   item: NostrEvent;
   profileCache: Record<string, ProfileEntry>;
+  incognito: boolean;
   onOpenProfile: (pubkey: string) => void;
   onOpenNote: (eventId: string) => void;
   onReply: (item: NostrEvent) => void;
@@ -515,9 +568,13 @@ function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
   return (
     <>
       <div className="note-meta">
-        <button className="avatar-mark" onClick={() => onOpenProfile(item.pubkey)} aria-label={`查看作者 ${profileName(item.pubkey, profileCache)}`}>
-          {item.pubkey.slice(0, 2).toUpperCase()}
-        </button>
+        <AvatarMark
+          pubkey={item.pubkey}
+          profileCache={profileCache}
+          incognito={incognito}
+          onClick={() => onOpenProfile(item.pubkey)}
+          ariaLabel={`查看作者 ${profileName(item.pubkey, profileCache)}`}
+        />
         <button className="author" onClick={() => onOpenProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
         <time dateTime={new Date(item.created_at * 1000).toISOString()}>{relativeTime(item.created_at)}</time>
       </div>
@@ -560,6 +617,7 @@ export function App() {
   const [followsOpen, setFollowsOpen] = useState(false);
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
+  const [incognitoMode, setIncognitoMode] = useState<boolean>(loadIncognitoMode);
   const [manualEvents, setManualEvents] = useState<NostrEvent[]>(() => loadCachedEvents());
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
@@ -618,6 +676,11 @@ export function App() {
   useEffect(() => {
     saveViewMode(viewMode);
   }, [viewMode]);
+
+  // 隐身模式持久化：缺省普通模式（自动加载头像）。
+  useEffect(() => {
+    saveIncognitoMode(incognitoMode);
+  }, [incognitoMode]);
 
   useEffect(() => {
     if (viewMode === "manual") setManualEvents(eventsRef.current);
@@ -941,6 +1004,15 @@ export function App() {
           <span>{onlineCount}/{enabledRelays.length} 资讯源在线</span>
         </button>
         <div className="utility-actions">
+          <button
+            className={`icon-button${incognitoMode ? " active" : ""}`}
+            onClick={() => setIncognitoMode((enabled) => !enabled)}
+            aria-pressed={incognitoMode}
+            aria-label={incognitoMode ? "关闭隐身模式（恢复自动加载头像）" : "打开隐身模式（不自动加载头像）"}
+            title={incognitoMode ? "隐身模式：不自动加载远程头像" : "普通模式：自动加载远程头像"}
+          >
+            <Icon name="incognito" />
+          </button>
           <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明"><Icon name="help" /></button>
           <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载"><Icon name="download" /></button>
           <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
@@ -1002,7 +1074,7 @@ export function App() {
           <ol className="feed-list" aria-live="polite">
             {visibleEvents.map((item) => (
               <li className="note" key={item.id}>
-                <NoteCard item={item} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
+                <NoteCard item={item} profileCache={profileCache} incognito={incognitoMode} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
               </li>
             ))}
           </ol>
@@ -1012,7 +1084,7 @@ export function App() {
               <ol className="feed-list auto-grid">
                 {autoGridItems.map((item) => (
                   <li className="note" key={item.id}>
-                    <NoteCard item={item} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
+                    <NoteCard item={item} profileCache={profileCache} incognito={incognitoMode} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
                   </li>
                 ))}
               </ol>
@@ -1084,6 +1156,8 @@ export function App() {
               <p>点标题栏的下载图标会清空本地缓存并重新下载最新版，页面会自动重载。</p>
               <h3>离线使用</h3>
               <p>页面加载一次后会被完整缓存，断网或关闭浏览器后重新打开也能继续使用。</p>
+              <h3>隐身模式</h3>
+              <p>点标题栏的面具图标打开隐身模式：远程头像不再自动加载，只显示首字母，避免向头像服务器暴露你的浏览行为。缺省是普通模式，头像自动加载。选择会自动记住。</p>
             </div>
           </aside>
         </div>
@@ -1125,7 +1199,7 @@ export function App() {
               <button className="icon-button" onClick={() => setDetailEventId(null)} aria-label="关闭帖子详情"><Icon name="close" /></button>
             </div>
             <button className="detail-author" onClick={() => openProfile(detailEvent.pubkey)}>
-              <span className="avatar-mark">{detailEvent.pubkey.slice(0, 2).toUpperCase()}</span>
+              <AvatarMark pubkey={detailEvent.pubkey} profileCache={profileCache} incognito={incognitoMode} />
               <span><strong>{shortKey(encodeNip19("npub", detailEvent.pubkey))}</strong><small>查看这个作者的帖子</small></span>
             </button>
             <div className="detail-content"><FormattedNote content={detailEvent.content} /></div>
@@ -1151,7 +1225,7 @@ export function App() {
               <button className="icon-button" onClick={() => setProfilePubkey(null)} aria-label="关闭作者详情"><Icon name="close" /></button>
             </div>
             <div className="profile-identity">
-              <span className="avatar-mark large-avatar">{profilePubkey.slice(0, 2).toUpperCase()}</span>
+              <AvatarMark pubkey={profilePubkey} profileCache={profileCache} incognito={incognitoMode} large />
               <div className="profile-names">
                 <strong>{profileName(profilePubkey, profileCache)}</strong>
                 {profileDetail?.nip05 && <small className="profile-nip05">{profileDetail.nip05}</small>}
@@ -1201,7 +1275,7 @@ export function App() {
                       onClick={() => { setFollowsOpen(false); openProfile(followed); }}
                       aria-label={`查看 ${profileName(followed, profileCache)}`}
                     >
-                      <span className="avatar-mark">{followed.slice(0, 2).toUpperCase()}</span>
+                      <AvatarMark pubkey={followed} profileCache={profileCache} incognito={incognitoMode} />
                       <span className="follow-names">
                         <strong>{profileName(followed, profileCache)}</strong>
                         <small>{shortKey(encodeNip19("npub", followed))}</small>

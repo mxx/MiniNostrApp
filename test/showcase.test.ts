@@ -6,10 +6,13 @@ import {
   AUTO_GRID_GAP,
   autoGridCapacity,
   autoGridWindow,
+  avatarDisplay,
   buildReplyTags,
   defaultUpdateEnv,
   forceAppUpdate,
+  loadIncognitoMode,
   loadViewMode,
+  saveIncognitoMode,
   saveViewMode,
 } from "../src/App";
 import {
@@ -332,5 +335,55 @@ describe("文案：资讯源", () => {
   test("关键入口使用资讯源", () => {
     expect(appSrc).toContain("资讯源管理");
     expect(appSrc).toContain("资讯源在线");
+  });
+});
+
+describe("隐私头像开关（隐身模式）", () => {
+  beforeEach(() => localStorage.clear());
+
+  test("缺省普通模式（不隐身）", () => {
+    expect(loadIncognitoMode()).toBe(false);
+  });
+
+  test("开关持久化到 localStorage", () => {
+    saveIncognitoMode(true);
+    expect(loadIncognitoMode()).toBe(true);
+    saveIncognitoMode(false);
+    expect(loadIncognitoMode()).toBe(false);
+  });
+
+  test("普通模式：合法 http(s) 头像自动加载", () => {
+    const cache = { k1: { profile: { picture: "https://example.com/a.png" }, created_at: 0, fetched_at: 0 } };
+    expect(avatarDisplay("k1", cache, false)).toEqual({ kind: "image", src: "https://example.com/a.png" });
+  });
+
+  test("普通模式：无头像或非法地址只显示首字母", () => {
+    expect(avatarDisplay("k2", {}, false)).toEqual({ kind: "initials" });
+    const cache = { k3: { profile: { picture: "data:image/png;base64,xx" }, created_at: 0, fetched_at: 0 } };
+    expect(avatarDisplay("k3", cache, false)).toEqual({ kind: "initials" });
+  });
+
+  test("隐身模式：有头像地址也不自动加载", () => {
+    const cache = { k1: { profile: { picture: "https://example.com/a.png" }, created_at: 0, fetched_at: 0 } };
+    expect(avatarDisplay("k1", cache, true)).toEqual({ kind: "initials" });
+  });
+
+  test("开关按钮与 AvatarMark 接线", () => {
+    expect(appSrc).toContain('"打开隐身模式（不自动加载头像）"');
+    expect(appSrc).toContain('"关闭隐身模式（恢复自动加载头像）"');
+    expect(appSrc).toContain("aria-pressed={incognitoMode}");
+    expect(appSrc).toContain("saveIncognitoMode(incognitoMode)");
+    expect(appSrc).toContain("setIncognitoMode((enabled) => !enabled)");
+    expect(appSrc).toContain("<AvatarMark");
+    expect(appSrc).toContain('referrerPolicy="no-referrer"');
+  });
+
+  test("帮助说明提到隐身模式", () => {
+    expect(appSrc).toContain("隐身模式");
+  });
+
+  test("头像 img 与开关激活态样式存在", () => {
+    expect(css).toContain(".avatar-mark img");
+    expect(css).toContain(".icon-button.active");
   });
 });

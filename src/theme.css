@@ -85,6 +85,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .signal-live { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
 .utility-actions { display: flex; align-items: center; gap: 7px; }
 .icon-button { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: transparent; }
+.icon-button.active { background: var(--surface); color: var(--accent); }
 .icon-button:active { background: var(--surface); }
 .identity-button { display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); color: var(--dim); }
 .identity-button span { display: none; font: 600 12px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; }
@@ -117,6 +118,7 @@ h2 { font-size: 24px; line-height: 1.08; }
 .note { height: 340px; display: flex; flex-direction: column; padding: 17px 16px 15px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .note-meta { display: grid; grid-template-columns: 31px minmax(0, auto) 1fr; align-items: center; gap: 9px; }
 .avatar-mark { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 8px 8px 8px 2px; background: var(--accent-soft); color: var(--accent); font: 800 10px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; cursor: pointer; overflow: hidden; padding: 0; }
+.avatar-mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .large-avatar-img { width: 54px; height: 54px; border-radius: 14px 14px 14px 4px; }
 .author { min-width: 0; padding: 6px 0; overflow: hidden; text-overflow: ellipsis; border: 0; background: transparent; text-align: left; font: 650 12px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; color: var(--text); cursor: pointer; }
