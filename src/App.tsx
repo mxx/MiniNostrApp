@@ -173,12 +173,18 @@ export const APP_VERSION =
 export interface AppUpdateEnv {
   caches?: { keys(): Promise<string[]>; delete(name: string): Promise<boolean> };
   getServiceWorkerRegistrations?: () => Promise<readonly { unregister(): Promise<boolean> }[]>;
+  /**
+   * 刷新浏览器 HTTP 缓存中的当前文档。index.html 带有 Cache-Control: max-age，
+   * 直接 location.reload() 会命中 HTTP 缓存里的旧 HTML，导致“更新无效”。
+   */
+  refreshDocument?: () => Promise<void>;
   reload: () => void;
 }
 
 /**
  * “版本更新”按钮：清掉全部 Cache Storage 与已注册的 Service Worker，
- * 然后重载页面，强制把应用完整重新下载一遍。
+ * 再强制走网络刷新 HTTP 缓存中的 index.html，最后重载页面，
+ * 把应用完整重新下载一遍。
  * 无论清理成败最后都会重载，避免按钮点下没反应。
  */
 export async function forceAppUpdate(env: AppUpdateEnv): Promise<void> {
@@ -191,19 +197,29 @@ export async function forceAppUpdate(env: AppUpdateEnv): Promise<void> {
       const regs = await env.getServiceWorkerRegistrations();
       await Promise.all(regs.map((reg) => reg.unregister()));
     }
+    // max-age 下 reload() 会直接命中旧 HTML：先用 cache:"reload" 强制走网络，
+    // 把 HTTP 缓存条目更新为最新 index.html，再 reload 才能真正拿到新版本。
+    // （SW 已在上一步注销，且 Cache Storage 已清空，即使旧 SW 仍拦截这次
+    // fetch 也会因缓存未命中而走网络，request 的 cache 模式会一并透传。）
+    if (env.refreshDocument) await env.refreshDocument();
   } catch {
     // 清理失败不阻塞：照样重载，避免按钮点下没反应。
   }
   env.reload();
 }
 
-/** forceAppUpdate 在浏览器里的默认环境：Cache Storage + SW 注册表 + location.reload。 */
+/** forceAppUpdate 在浏览器里的默认环境：Cache Storage + SW 注册表 + HTTP 缓存刷新 + location.reload。 */
 export function defaultUpdateEnv(): AppUpdateEnv {
+  const inBrowser = typeof window !== "undefined";
   return {
-    caches: typeof window !== "undefined" && "caches" in window ? window.caches : undefined,
+    caches: inBrowser && "caches" in window ? window.caches : undefined,
     getServiceWorkerRegistrations:
       typeof navigator !== "undefined" && "serviceWorker" in navigator
         ? () => navigator.serviceWorker.getRegistrations()
+        : undefined,
+    refreshDocument:
+      inBrowser && typeof window.fetch === "function"
+        ? () => window.fetch(window.location.href, { cache: "reload" }).then(() => undefined)
         : undefined,
     reload: () => window.location.reload(),
   };

@@ -266,4 +266,56 @@ describe("长文接线", () => {
     expect(css).toContain(".longform-open");
     expect(css).toContain(".longform-cover");
   });
+
+  test("长文卡片不定高（不继承 .note 的 340px）", () => {
+    expect(css).toMatch(/\.longform-note\s*\{[^}]*height:\s*auto/);
+  });
+
+  test("长文卡片标题盒约为原来一半高：12px 单行省略", () => {
+    expect(css).toMatch(/\.longform-open strong\s*\{[^}]*font-size:\s*12px/);
+    expect(css).toMatch(/\.longform-open strong\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.longform-open strong\s*\{[^}]*text-overflow:\s*ellipsis/);
+  });
+
+  test("长文卡片摘要最多两行、角标并入作者行", () => {
+    expect(css).toMatch(/\.longform-open > span\s*\{[^}]*-webkit-line-clamp:\s*2;/);
+    expect(css).toMatch(/\.longform-note \.note-meta\s*\{[^}]*grid-template-columns:\s*31px minmax\(0,\s*auto\) 1fr auto/);
+  });
+
+  test("长文卡片各部件高度之和 < 170px", () => {
+    const block = (selector: string): string => {
+      const m = css.match(new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}"));
+      if (!m) throw new Error(`missing CSS rule: ${selector}`);
+      return m[1];
+    };
+    const px = (b: string, prop: string): number => {
+      const m = b.match(new RegExp(prop + ":\\s*([\\d.]+)px"));
+      if (!m) throw new Error(`missing ${prop}`);
+      return parseFloat(m[1]);
+    };
+    const num = (b: string, prop: string): number => {
+      const m = b.match(new RegExp(prop + ":\\s*([\\d.]+)"));
+      if (!m) throw new Error(`missing ${prop}`);
+      return parseFloat(m[1]);
+    };
+    const note = block(".longform-note");
+    const metaCols = block(".longform-note .note-meta").match(/grid-template-columns:\s*([\d.]+)px/);
+    const open = block(".longform-open");
+    const title = block(".longform-open strong");
+    const excerpt = block(".longform-open > span");
+    const footer = block(".note-footer");
+    const footerFont = block(".note-relays").match(/font:[^;]*?([\d.]+)px\/([\d.]+)/);
+    if (!metaCols || !footerFont) throw new Error("parse failed");
+    // 自上而下：上下 padding + 作者行 + gap + 标题 + gap(卡片内) + 摘要(≤2行) + gap + 底栏
+    const total =
+      px(note, "padding") * 2 +
+      parseFloat(metaCols[1]) +
+      num(note, "gap") +
+      px(title, "font-size") * num(title, "line-height") +
+      num(open, "gap") +
+      px(excerpt, "font-size") * num(excerpt, "line-height") * num(excerpt, "-webkit-line-clamp") +
+      num(note, "gap") +
+      (px(footer, "padding-top") + parseFloat(footerFont[1]) * parseFloat(footerFont[2]));
+    expect(total).toBeLessThan(170);
+  });
 });

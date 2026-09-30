@@ -300,6 +300,52 @@ describe("版本更新按钮（清缓存重载）", () => {
     expect(reloaded).toBe(true);
   });
 
+  test("重载前强制刷新 HTTP 缓存（顺序：清缓存→注销SW→刷新文档→重载）", async () => {
+    const order: string[] = [];
+    await forceAppUpdate({
+      caches: {
+        keys: async () => ["c1"],
+        delete: async (name: string) => {
+          order.push(`del:${name}`);
+          return true;
+        },
+      },
+      getServiceWorkerRegistrations: async () => [
+        {
+          unregister: async () => {
+            order.push("unregister");
+            return true;
+          },
+        },
+      ],
+      refreshDocument: async () => {
+        order.push("refresh");
+      },
+      reload: () => {
+        order.push("reload");
+      },
+    });
+    // 不刷新 HTTP 缓存的话，max-age 下 reload() 会命中旧 index.html，
+    // 导致更新按钮看起来无效；refresh 必须发生在 reload 之前。
+    expect(order).toEqual(["del:c1", "unregister", "refresh", "reload"]);
+  });
+
+  test("刷新文档抛错也照样重载", async () => {
+    let refreshed = false;
+    let reloaded = false;
+    await forceAppUpdate({
+      refreshDocument: async () => {
+        refreshed = true;
+        throw new Error("offline");
+      },
+      reload: () => {
+        reloaded = true;
+      },
+    });
+    expect(refreshed).toBe(true);
+    expect(reloaded).toBe(true);
+  });
+
   test("defaultUpdateEnv 在非浏览器环境可构造", () => {
     const env = defaultUpdateEnv();
     expect(typeof env.reload).toBe("function");
