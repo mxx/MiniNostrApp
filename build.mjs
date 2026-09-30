@@ -21,6 +21,18 @@ await buildClient();
   for (const name of changed) console.log(`app version ${version} injected into ${name}`);
 }
 
+// 网站名：由 site.config.json 的 name 字段生成，注入产物 JS 的 __SITE_NAME__
+// 占位符，并改写 dist/index.html 的 <title>。网站名是可配置项，不写死在源码中。
+{
+  const { getSiteName, injectSiteName, injectSiteTitle } = await import("./scripts/site-config.mjs");
+  const clientDir = fileURLToPath(new URL("./", import.meta.url));
+  const siteName = getSiteName(clientDir);
+  const changed = injectSiteName(join(clientDir, "dist", "assets"), siteName);
+  for (const name of changed) console.log(`site name ${siteName} injected into ${name}`);
+  const titleChanged = injectSiteTitle(join(clientDir, "dist", "index.html"), siteName);
+  if (titleChanged) console.log(`site title set to ${siteName} in dist/index.html`);
+}
+
 // Standalone static deployments (e.g. lulin.org/client/) opt in to the
 // service worker + site icons. Muse's artifact packager accepts exactly one
 // JavaScript entry, so the artifact relies on the host shell's offline asset

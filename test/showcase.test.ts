@@ -23,6 +23,13 @@ import {
   getAppVersion,
   injectAppVersion,
 } from "../scripts/app-version.mjs";
+import {
+  DEFAULT_SITE_NAME,
+  getSiteName,
+  injectSiteName,
+  injectSiteTitle,
+  SITE_NAME_PLACEHOLDER,
+} from "../scripts/site-config.mjs";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -291,6 +298,67 @@ describe("版本号（git describe 注入）", () => {
   test("build.mjs 在构建后注入版本", () => {
     expect(buildSrc).toContain("git describe");
     expect(buildSrc).toContain("injectAppVersion");
+  });
+});
+
+describe("网站名（site.config.json 注入）", () => {
+  test("getSiteName 读取 site.config.json", () => {
+    expect(getSiteName(new URL("../", import.meta.url))).toBe("绿野仙踪");
+  });
+
+  test("getSiteName 缺失/非法时回退默认值", () => {
+    expect(getSiteName(tmpdir())).toBe(DEFAULT_SITE_NAME);
+    const dir = mkdtempSync(join(tmpdir(), "site-"));
+    writeFileSync(join(dir, "site.config.json"), "not json{{");
+    expect(getSiteName(dir)).toBe(DEFAULT_SITE_NAME);
+    writeFileSync(join(dir, "site.config.json"), JSON.stringify({ name: "  " }));
+    expect(getSiteName(dir)).toBe(DEFAULT_SITE_NAME);
+  });
+
+  test("getSiteName 支持改名", () => {
+    const dir = mkdtempSync(join(tmpdir(), "site-"));
+    writeFileSync(join(dir, "site.config.json"), JSON.stringify({ name: "我的小站" }));
+    expect(getSiteName(dir)).toBe("我的小站");
+  });
+
+  test("injectSiteName 只改写含占位符的 JS", () => {
+    const dir = mkdtempSync(join(tmpdir(), "site-"));
+    writeFileSync(join(dir, "a.js"), `const n=${SITE_NAME_PLACEHOLDER};console.log(n);`);
+    writeFileSync(join(dir, "b.js"), `console.log("nope");`);
+    const changed = injectSiteName(dir, "我的小站");
+    expect(changed).toEqual(["a.js"]);
+    expect(readFileSync(join(dir, "a.js"), "utf8")).toBe(`const n="我的小站";console.log(n);`);
+  });
+
+  test("injectSiteTitle 改写 <title> 并转义", () => {
+    const dir = mkdtempSync(join(tmpdir(), "site-"));
+    const p = join(dir, "index.html");
+    writeFileSync(p, `<html><head><title>旧标题</title></head></html>`);
+    expect(injectSiteTitle(p, "我的小站")).toBe(true);
+    expect(readFileSync(p, "utf8")).toContain("<title>我的小站</title>");
+    writeFileSync(p, `<html><head><title>x</title></head></html>`);
+    injectSiteTitle(p, `a<b>&"c`);
+    expect(readFileSync(p, "utf8")).toContain("<title>a&lt;b&gt;&amp;\"c</title>");
+    writeFileSync(p, `<html><head></head></html>`);
+    expect(injectSiteTitle(p, "我的小站")).toBe(false);
+  });
+
+  test("App 声明 __SITE_NAME__ 外部全局，未注入时回退默认值", () => {
+    expect(appSrc).toContain("declare const __SITE_NAME__");
+    expect(appSrc).toContain("{SITE_NAME}");
+    expect(appSrc).toContain("document.title = SITE_NAME");
+  });
+
+  test("build.mjs 在构建后注入网站名并改写 <title>", () => {
+    expect(buildSrc).toContain("injectSiteName");
+    expect(buildSrc).toContain("injectSiteTitle");
+    expect(buildSrc).toContain("site.config.json");
+  });
+
+  test("源码中不再写死网站名", () => {
+    // 标题栏与帮助文案都走 SITE_NAME；index.html 的 <title> 只是 JS 加载前的静态 fallback。
+    expect(appSrc).not.toMatch(/<h1[^>]*>绿野仙踪/);
+    expect(appSrc).not.toContain("绿野仙踪是一个极简的");
   });
 });
 

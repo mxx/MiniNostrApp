@@ -200,6 +200,14 @@ declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
   typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__ ? __APP_VERSION__ : "dev";
 
+declare const __SITE_NAME__: string | undefined;
+/**
+ * 网站名：构建时由 build.mjs 从 site.config.json 注入；
+ * 未经构建流程（如 artifact 预览）时回退为 "绿野仙踪"。
+ */
+export const SITE_NAME =
+  typeof __SITE_NAME__ !== "undefined" && __SITE_NAME__ ? __SITE_NAME__ : "绿野仙踪";
+
 export interface AppUpdateEnv {
   caches?: { keys(): Promise<string[]>; delete(name: string): Promise<boolean> };
   getServiceWorkerRegistrations?: () => Promise<readonly { unregister(): Promise<boolean> }[]>;
@@ -1191,6 +1199,11 @@ export function App() {
     saveViewMode(viewMode);
   }, [viewMode]);
 
+  // 网站名是可配置项（site.config.json）：运行时写入 document.title。
+  useEffect(() => {
+    document.title = SITE_NAME;
+  }, []);
+
   // 隐身模式持久化：缺省普通模式（自动加载头像）。
   useEffect(() => {
     saveIncognitoMode(incognitoMode);
@@ -1704,7 +1717,7 @@ export function App() {
         <section className="feed-intro" aria-labelledby="feed-heading">
           <div>
             <p className="section-index">PUBLIC NOTES / KIND 1</p>
-            <h1 id="feed-heading">绿野仙踪 <small className="app-version">{APP_VERSION}</small></h1>
+            <h1 id="feed-heading">{SITE_NAME} <small className="app-version">{APP_VERSION}</small></h1>
           </div>
           <button className="compose-button desktop-compose" onClick={() => { setReplyTarget(null); setDraft(""); setComposerOpen(true); }}><Icon name="edit" />发帖子</button>
         </section>
@@ -1846,7 +1859,7 @@ export function App() {
               <button className="icon-button" onClick={() => setHelpOpen(false)} aria-label="关闭使用说明"><Icon name="close" /></button>
             </div>
             <div className="help-body">
-              <p>绿野仙踪是一个极简的 Nostr 帖子浏览器，从多个资讯源拉取公开帖子，去重后展示。你的私钥永远不会经过页面。</p>
+              <p>{SITE_NAME}是一个极简的 Nostr 帖子浏览器，从多个资讯源拉取公开帖子，去重后展示。你的私钥永远不会经过页面。</p>
               <h3>自动模式</h3>
               <p>帖子按时间倒序铺成固定网格：新帖子进入第一排第一列，其余内容依次向右、向下顺移，最早的一条在最后一格。页面不滚动，也没有切换动画。手机等窄屏上会自动竖分三列、整块等比缩小，点小块进入详情。</p>
               <h3>手动模式</h3>
