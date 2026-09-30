@@ -37,6 +37,28 @@ type PublishStatus = {
   pending: number;
 };
 
+type Profile = {
+  name?: string;
+  display_name?: string;
+  about?: string;
+  picture?: string;
+  nip05?: string;
+  website?: string;
+  lud16?: string;
+};
+
+type ProfileEntry = {
+  profile: Profile;
+  created_at: number;
+  fetched_at: number;
+};
+
+type ContactList = {
+  tags: string[][];
+  content: string;
+  created_at: number;
+};
+
 const DEFAULT_RELAYS: RelayConfig[] = [
   { url: "ws://lulin.org", enabled: true },
   { url: "wss://relay.gulugulu.moe", enabled: true },
@@ -45,6 +67,10 @@ const DEFAULT_RELAYS: RelayConfig[] = [
 ];
 
 const RELAY_STORAGE_KEY = "nostr-min-relays-v1";
+const PROFILE_STORAGE_KEY = "nostr-min-profiles-v1";
+const FOLLOWS_STORAGE_KEY = "nostr-min-follows-v1";
+const LOCAL_FOLLOWS_STORAGE_KEY = "nostr-min-follows-local-v1";
+const PROFILE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENTS = 120;
 
 function createUuid(): string {
@@ -58,7 +84,7 @@ function createUuid(): string {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
-function loadRelays(): RelayConfig[] {
+export function loadRelays(): RelayConfig[] {
   try {
     const raw = localStorage.getItem(RELAY_STORAGE_KEY);
     if (!raw) return DEFAULT_RELAYS;
@@ -84,7 +110,7 @@ function loadRelays(): RelayConfig[] {
   }
 }
 
-function normalizeRelay(value: string): string | null {
+export function normalizeRelay(value: string): string | null {
   const trimmed = value.trim();
   try {
     const parsed = new URL(trimmed);
@@ -99,7 +125,7 @@ function normalizeRelay(value: string): string | null {
   }
 }
 
-function shortKey(value: string): string {
+export function shortKey(value: string): string {
   if (value.length <= 16) return value;
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
@@ -119,7 +145,7 @@ function bech32Polymod(values: number[]): number {
   return checksum;
 }
 
-function encodeNip19(prefix: "npub" | "note", hex: string): string {
+export function encodeNip19(prefix: "npub" | "note", hex: string): string {
   if (!/^[0-9a-f]{64}$/i.test(hex)) return hex;
   const bytes = Array.from({ length: 32 }, (_, index) => Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16));
   const words: number[] = [];
@@ -142,7 +168,75 @@ function encodeNip19(prefix: "npub" | "note", hex: string): string {
   return `${prefix}1${[...words, ...checksum].map((value) => BECH32_CHARSET[value] ?? "q").join("")}`;
 }
 
-function relativeTime(timestamp: number): string {
+export function parseProfileContent(content: string): Profile | null {
+  try {
+    const data: unknown = JSON.parse(content);
+    if (typeof data !== "object" || data === null) return null;
+    const record = data as Record<string, unknown>;
+    const pick = (key: string): string | undefined => {
+      const value = record[key];
+      return typeof value === "string" && value.trim() ? value.trim() : undefined;
+    };
+    const profile: Profile = {
+      name: pick("name"),
+      display_name: pick("display_name"),
+      about: pick("about"),
+      picture: pick("picture"),
+      nip05: pick("nip05"),
+      website: pick("website"),
+      lud16: pick("lud16"),
+    };
+    return Object.values(profile).some(Boolean) ? profile : null;
+  } catch {
+    return null;
+  }
+}
+
+export function loadProfileCache(): Record<string, ProfileEntry> {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, ProfileEntry>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function loadStoredFollows(pubkey: string | null): string[] {
+  try {
+    const raw = localStorage.getItem(pubkey ? FOLLOWS_STORAGE_KEY : LOCAL_FOLLOWS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (pubkey) {
+      if (typeof parsed !== "object" || parsed === null) return [];
+      const list = (parsed as Record<string, unknown>)[pubkey];
+      return Array.isArray(list) ? list.filter((item): item is string => typeof item === "string") : [];
+    }
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function profileName(pubkey: string, cache: Record<string, ProfileEntry>): string {
+  const entry = cache[pubkey];
+  const name = entry?.profile.display_name || entry?.profile.name;
+  if (name) return name;
+  return shortKey(encodeNip19("npub", pubkey));
+}
+
+export function profilePicture(pubkey: string, cache: Record<string, ProfileEntry>): string | undefined {
+  return cache[pubkey]?.profile.picture;
+}
+
+/** Merge a new follow set into an existing kind-3 tag list: keep non-p tags, replace p tags. */
+export function mergeContactTags(existing: string[][] | undefined, follows: string[]): string[][] {
+  const kept = (existing ?? []).filter((tag) => tag[0] !== "p" && typeof tag[0] === "string");
+  return [...kept, ...follows.map((pubkey) => ["p", pubkey])];
+}
+
+export function relativeTime(timestamp: number): string {
   const date = new Date(timestamp * 1000);
   const delta = Date.now() - date.getTime();
   if (!Number.isFinite(delta) || Math.abs(delta) > 7 * 24 * 60 * 60 * 1000) {
@@ -175,7 +269,7 @@ function relayProtocol(url: string): "WS" | "WSS" {
 const INLINE_TOKEN = /(https?:\/\/[^\s<]+|(?:nostr:)?(?:npub|note|nevent|nprofile|naddr)1[0-9a-z]+|#[\p{L}\p{N}_]+)/giu;
 const TRAILING_PUNCTUATION = /[.,!?，。！？;；:：)）\]}]+$/;
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+export function renderInline(text: string, keyPrefix: string): ReactNode[] {
   return text.split(INLINE_TOKEN).filter(Boolean).flatMap((part, index) => {
     const key = `${keyPrefix}-${index}`;
     if (/^https?:\/\//i.test(part)) {
@@ -199,7 +293,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
-function FormattedNote({ content }: { content: string }) {
+export function FormattedNote({ content }: { content: string }) {
   if (!content) return <span className="muted">（空文本）</span>;
   const blocks = content.replace(/\r\n?/g, "\n").trim().split(/\n{2,}/);
   return (
@@ -220,14 +314,14 @@ function FormattedNote({ content }: { content: string }) {
   );
 }
 
-function isNostrEvent(value: unknown): value is SignedEvent {
+export function isNostrEvent(value: unknown, kind: number): value is SignedEvent {
   if (typeof value !== "object" || value === null) return false;
   const event = value as Partial<SignedEvent>;
   return (
     typeof event.id === "string" &&
     typeof event.pubkey === "string" &&
     typeof event.created_at === "number" &&
-    event.kind === 1 &&
+    event.kind === kind &&
     typeof event.content === "string" &&
     typeof event.sig === "string" &&
     Array.isArray(event.tags)
@@ -243,6 +337,28 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "close") return <svg {...common}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   if (name === "plus") return <svg {...common}><path d="M12 5v14M5 12h14"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
+}
+
+function AvatarImg({ picture, label, large }: { picture: string; label: string; large?: boolean }) {
+  return <img className={`avatar-img${large ? " large-avatar-img" : ""}`} src={picture} alt={label} loading="lazy" />;
+}
+
+/** Renders note content clamped to the card; shows an expand hint only when text actually overflows. */
+function ClampedNote({ content }: { content: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [clamped, setClamped] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) setClamped(el.scrollHeight > el.clientHeight + 6);
+  }, [content]);
+  return (
+    <>
+      <div className="note-content" ref={ref}>
+        <FormattedNote content={content} />
+      </div>
+      {clamped && <span className="expand-hint">内容较长，点击展开全文 →</span>}
+    </>
+  );
 }
 
 export function App() {
@@ -262,13 +378,26 @@ export function App() {
   const [detailEventId, setDetailEventId] = useState<string | null>(null);
   const [profilePubkey, setProfilePubkey] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState("");
+  const [profileCache, setProfileCache] = useState<Record<string, ProfileEntry>>(loadProfileCache);
+  const [follows, setFollows] = useState<string[]>(() => loadStoredFollows(null));
+  const [feedTab, setFeedTab] = useState<"all" | "following">("all");
+  const [followsOpen, setFollowsOpen] = useState(false);
+  const [followMessage, setFollowMessage] = useState("");
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
   const publishAcksRef = useRef<Map<string, Set<string>>>(new Map());
+  const profileSubsRef = useRef<Set<string>>(new Set());
+  const profileRequestedRef = useRef<Set<string>>(new Set());
+  const contactSubRef = useRef<string | null>(null);
+  const contactBaseRef = useRef<ContactList | null>(null);
 
   const enabledRelays = useMemo(() => relays.filter((relay) => relay.enabled), [relays]);
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;
   const detailEvent = detailEventId ? events.find((event) => event.id === detailEventId) ?? null : null;
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
+  const visibleEvents = feedTab === "following" ? events.filter((event) => follows.includes(event.pubkey)) : events;
+  const profileEntry = profilePubkey ? profileCache[profilePubkey] : undefined;
+  const profileDetail = profileEntry?.profile;
+  const isFollowing = profilePubkey ? follows.includes(profilePubkey) : false;
 
   function openNote(eventId: string) {
     setProfilePubkey(null);
@@ -308,6 +437,80 @@ export function App() {
     });
   }, []);
 
+  const addProfile = useCallback((incoming: SignedEvent) => {
+    const parsed = parseProfileContent(incoming.content);
+    if (!parsed) return;
+    setProfileCache((current) => {
+      const existing = current[incoming.pubkey];
+      if (existing && existing.created_at >= incoming.created_at) return current;
+      return { ...current, [incoming.pubkey]: { profile: parsed, created_at: incoming.created_at, fetched_at: Date.now() } };
+    });
+  }, []);
+
+  const addContactList = useCallback((incoming: SignedEvent) => {
+    const base: ContactList = { tags: incoming.tags, content: incoming.content, created_at: incoming.created_at };
+    if (contactBaseRef.current && contactBaseRef.current.created_at >= incoming.created_at) return;
+    contactBaseRef.current = base;
+    const list = incoming.tags
+      .filter((tag) => tag[0] === "p" && typeof tag[1] === "string")
+      .map((tag) => tag[1] as string);
+    setFollows((current) => {
+      const merged = [...current];
+      for (const pubkey of list) if (!merged.includes(pubkey)) merged.push(pubkey);
+      return merged;
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profileCache));
+    } catch {
+      // Storage quota or privacy mode: keep profiles in memory only.
+    }
+  }, [profileCache]);
+
+  // Fetch kind-0 profiles for authors we have not seen recently. Runs on new
+  // authors and on reconnect (requested set is cleared when epoch changes).
+  const wantedAuthors = useMemo(() => [...new Set(events.map((event) => event.pubkey))], [events]);
+  const profileEpochRef = useRef(connectionEpoch);
+  useEffect(() => {
+    if (profileEpochRef.current !== connectionEpoch) {
+      profileEpochRef.current = connectionEpoch;
+      profileRequestedRef.current.clear();
+    }
+    const now = Date.now();
+    const missing = wantedAuthors.filter((author) => {
+      const hit = profileCache[author];
+      if (hit && now - hit.fetched_at < PROFILE_TTL_MS) return false;
+      return !profileRequestedRef.current.has(author);
+    });
+    if (missing.length === 0) return;
+    const liveSockets = [...socketsRef.current.values()].filter((socket) => socket.readyState === WebSocket.OPEN);
+    if (liveSockets.length === 0) return;
+    for (let index = 0; index < missing.length; index += 60) {
+      const chunk = missing.slice(index, index + 60);
+      const subId = `profile-${createUuid().slice(0, 8)}`;
+      profileSubsRef.current.add(subId);
+      chunk.forEach((author) => profileRequestedRef.current.add(author));
+      for (const socket of liveSockets) {
+        socket.send(JSON.stringify(["REQ", subId, { kinds: [0], authors: chunk }]));
+      }
+    }
+  }, [wantedAuthors, profileCache, connectionEpoch]);
+
+  // When the signer is connected, load our own kind-3 contact list.
+  useEffect(() => {
+    if (!pubkey) return;
+    setFollows(loadStoredFollows(pubkey));
+    const liveSockets = [...socketsRef.current.values()].filter((socket) => socket.readyState === WebSocket.OPEN);
+    if (liveSockets.length === 0) return;
+    const subId = `contacts-${createUuid().slice(0, 8)}`;
+    contactSubRef.current = subId;
+    for (const socket of liveSockets) {
+      socket.send(JSON.stringify(["REQ", subId, { kinds: [3], authors: [pubkey], limit: 1 }]));
+    }
+  }, [pubkey, connectionEpoch]);
+
   useEffect(() => {
     const active = relays.filter((relay) => relay.enabled);
     const timeout = window.setTimeout(() => {
@@ -332,8 +535,15 @@ export function App() {
             try {
               const frame: unknown = JSON.parse(String(message.data));
               if (!Array.isArray(frame)) return;
-              if (frame[0] === "EVENT" && frame[1] === subId && isNostrEvent(frame[2])) {
-                addIncomingEvent(frame[2], relay.url);
+              if (frame[0] === "EVENT" && typeof frame[1] === "string") {
+                const incoming = frame[2];
+                if (frame[1] === subId && isNostrEvent(incoming, 1)) {
+                  addIncomingEvent(incoming, relay.url);
+                } else if (profileSubsRef.current.has(frame[1]) && isNostrEvent(incoming, 0)) {
+                  addProfile(incoming);
+                } else if (frame[1] === contactSubRef.current && isNostrEvent(incoming, 3)) {
+                  addContactList(incoming);
+                }
               }
               if (frame[0] === "OK" && typeof frame[1] === "string" && typeof frame[2] === "boolean") {
                 const eventId = frame[1];
@@ -402,7 +612,7 @@ export function App() {
         tags: [],
         content,
       });
-      if (!isNostrEvent(signed)) throw new Error("invalid signed event");
+      if (!isNostrEvent(signed, 1)) throw new Error("invalid signed event");
       publishAcksRef.current.set(signed.id, new Set());
       setPublishStatus({ eventId: signed.id, total: liveSockets.length, accepted: 0, rejected: 0, pending: liveSockets.length });
       setEvents((current) => [{ ...signed, relays: ["本地发布"] }, ...current.filter((item) => item.id !== signed.id)].slice(0, MAX_EVENTS));
@@ -412,6 +622,46 @@ export function App() {
     } catch {
       setSignerError("签名未完成，帖子没有发送。");
     }
+  }
+
+  async function toggleFollow(target: string) {
+    setFollowMessage("");
+    const following = follows.includes(target);
+    const next = following ? follows.filter((item) => item !== target) : [...follows, target];
+    setFollows(next);
+    if (pubkey && window.nostr) {
+      try {
+        const base = contactBaseRef.current;
+        const signed = await window.nostr.signEvent({
+          kind: 3,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: mergeContactTags(base?.tags, next),
+          content: base?.content ?? "",
+        });
+        if (signed.kind !== 3 || !Array.isArray(signed.tags)) throw new Error("invalid contact list");
+        contactBaseRef.current = { tags: signed.tags, content: signed.content, created_at: signed.created_at };
+        const liveSockets = [...socketsRef.current.values()].filter((socket) => socket.readyState === WebSocket.OPEN);
+        for (const socket of liveSockets) socket.send(JSON.stringify(["EVENT", signed]));
+        try {
+          const raw = localStorage.getItem(FOLLOWS_STORAGE_KEY);
+          const parsed: unknown = raw ? JSON.parse(raw) : {};
+          const record = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, string[]>) : {};
+          localStorage.setItem(FOLLOWS_STORAGE_KEY, JSON.stringify({ ...record, [pubkey]: next }));
+        } catch {
+          // Keep the in-memory follow set when storage is unavailable.
+        }
+        setFollowMessage(following ? "已取消关注，关注列表已发布到中继。" : "已关注，关注列表已发布到中继。");
+      } catch {
+        setFollowMessage("签名未完成，关注列表没有发布；本地状态已更新。");
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(LOCAL_FOLLOWS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Keep the in-memory follow set when storage is unavailable.
+    }
+    setFollowMessage(following ? "已取消本地关注。" : "已加入本地关注（连接签名器后可发布到链上）。");
   }
 
   function addRelay(event: FormEvent) {
@@ -468,33 +718,46 @@ export function App() {
           </div>
         )}
 
-        {events.length === 0 ? (
+        <div className="feed-tabs" role="tablist" aria-label="帖子筛选">
+          <button role="tab" aria-selected={feedTab === "all"} className={`feed-tab${feedTab === "all" ? " active" : ""}`} onClick={() => setFeedTab("all")}>全部</button>
+          <button role="tab" aria-selected={feedTab === "following"} className={`feed-tab${feedTab === "following" ? " active" : ""}`} onClick={() => setFeedTab("following")}>关注{follows.length > 0 ? ` · ${follows.length}` : ""}</button>
+          {feedTab === "following" && follows.length > 0 && (
+            <button className="manage-follows" onClick={() => setFollowsOpen(true)}>管理关注</button>
+          )}
+        </div>
+
+        {visibleEvents.length === 0 ? (
           <section className="empty-state">
             <div className="empty-signal"><span /><span /><span /></div>
-            <h2>{onlineCount > 0 ? "正在等待帖子" : "还没有连上中继"}</h2>
-            <p>{onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开中继面板查看每个地址的状态，或添加一个可用中继。"}</p>
-            <button onClick={() => onlineCount > 0 ? setConnectionEpoch((value) => value + 1) : setPanelOpen(true)}>
-              {onlineCount > 0 ? "重新订阅" : "管理中继"}
+            <h2>{feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上中继"}</h2>
+            <p>{feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开中继面板查看每个地址的状态，或添加一个可用中继。"}</p>
+            <button onClick={() => feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? setConnectionEpoch((value) => value + 1) : setPanelOpen(true)}>
+              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? "重新订阅" : "管理中继"}
             </button>
           </section>
         ) : (
           <ol className="feed-list" aria-live="polite">
-            {events.map((item) => (
+            {visibleEvents.map((item) => {
+              const picture = profilePicture(item.pubkey, profileCache);
+              return (
               <li className="note" key={item.id}>
                 <div className="note-meta">
-                  <button className="avatar-mark" onClick={() => openProfile(item.pubkey)} aria-label={`查看作者 ${shortKey(item.pubkey)}`}>{item.pubkey.slice(0, 2).toUpperCase()}</button>
-                  <button className="author" onClick={() => openProfile(item.pubkey)} title={item.pubkey}>{shortKey(encodeNip19("npub", item.pubkey))}</button>
+                  <button className="avatar-mark" onClick={() => openProfile(item.pubkey)} aria-label={`查看作者 ${profileName(item.pubkey, profileCache)}`}>
+                    {picture ? <AvatarImg picture={picture} label="" /> : item.pubkey.slice(0, 2).toUpperCase()}
+                  </button>
+                  <button className="author" onClick={() => openProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
                   <time dateTime={new Date(item.created_at * 1000).toISOString()}>{relativeTime(item.created_at)}</time>
                 </div>
                 <button className="note-open" onClick={() => openNote(item.id)} aria-label={`查看帖子 ${shortKey(encodeNip19("note", item.id))}`}>
-                  <div className="note-content"><FormattedNote content={item.content} /></div>
+                  <ClampedNote content={item.content} />
                   <div className="note-footer">
                     <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个中继`}</span>
                     <span className="view-detail">查看详情 →</span>
                   </div>
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ol>
         )}
       </main>
@@ -587,9 +850,24 @@ export function App() {
               <button className="icon-button" onClick={() => setProfilePubkey(null)} aria-label="关闭作者详情"><Icon name="close" /></button>
             </div>
             <div className="profile-identity">
-              <span className="avatar-mark large-avatar">{profilePubkey.slice(0, 2).toUpperCase()}</span>
+              {profileDetail?.picture ? (
+                <AvatarImg picture={profileDetail.picture} label={profileName(profilePubkey, profileCache)} large />
+              ) : (
+                <span className="avatar-mark large-avatar">{profilePubkey.slice(0, 2).toUpperCase()}</span>
+              )}
+              <div className="profile-names">
+                <strong>{profileName(profilePubkey, profileCache)}</strong>
+                {profileDetail?.nip05 && <small className="profile-nip05">{profileDetail.nip05}</small>}
+              </div>
+              {profileDetail?.about && <p className="profile-about">{profileDetail.about}</p>}
               <code>{encodeNip19("npub", profilePubkey)}</code>
-              <button onClick={() => void copyValue(encodeNip19("npub", profilePubkey), "公钥")}>复制完整 npub</button>
+              <div className="profile-actions">
+                <button className={`follow-button${isFollowing ? " following" : ""}`} onClick={() => void toggleFollow(profilePubkey)}>
+                  {isFollowing ? "✓ 已关注" : "＋ 关注"}
+                </button>
+                <button onClick={() => void copyValue(encodeNip19("npub", profilePubkey), "公钥")}>复制完整 npub</button>
+              </div>
+              {followMessage && <p className="copy-status" role="status">{followMessage}</p>}
             </div>
             {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
             <div className="profile-posts">
@@ -601,6 +879,48 @@ export function App() {
                 </button>
               ))}
             </div>
+          </section>
+        </div>
+      )}
+
+      {followsOpen && (
+        <div className="sheet-backdrop detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setFollowsOpen(false); }}>
+          <section className="detail-sheet" role="dialog" aria-modal="true" aria-labelledby="follows-title">
+            <div className="sheet-heading">
+              <div><p className="section-index">FOLLOWING</p><h2 id="follows-title">关注列表</h2></div>
+              <button className="icon-button" onClick={() => setFollowsOpen(false)} aria-label="关闭关注列表"><Icon name="close" /></button>
+            </div>
+            <p className="sheet-copy">{pubkey ? "修改会经签名器签名，发布 kind-3 关注列表到中继。" : "未连接签名器，关注仅保存在本浏览器。"}</p>
+            {followMessage && <p className="copy-status" role="status">{followMessage}</p>}
+            {follows.length === 0 ? (
+              <p className="muted">还没有关注任何人。在帖子或作者页点「关注」即可添加。</p>
+            ) : (
+              <ul className="follow-list">
+                {follows.map((followed) => {
+                  const picture = profilePicture(followed, profileCache);
+                  return (
+                    <li key={followed} className="follow-row">
+                      <button
+                        className="follow-identity"
+                        onClick={() => { setFollowsOpen(false); openProfile(followed); }}
+                        aria-label={`查看 ${profileName(followed, profileCache)}`}
+                      >
+                        {picture ? (
+                          <AvatarImg picture={picture} label="" />
+                        ) : (
+                          <span className="avatar-mark">{followed.slice(0, 2).toUpperCase()}</span>
+                        )}
+                        <span className="follow-names">
+                          <strong>{profileName(followed, profileCache)}</strong>
+                          <small>{shortKey(encodeNip19("npub", followed))}</small>
+                        </span>
+                      </button>
+                      <button className="unfollow-button" onClick={() => void toggleFollow(followed)}>取消关注</button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
         </div>
       )}
