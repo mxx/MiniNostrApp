@@ -241,6 +241,9 @@ h2 { font-size: 24px; line-height: 1.08; }
 .profile-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .follow-button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: var(--bg); font-weight: 750; cursor: pointer; }
 .follow-button.following { background: var(--accent-soft); color: var(--accent); }
+.profile-history-hint { color: var(--dim); font-size: 13px; margin: 6px 0 0; }
+.load-more-button { margin-top: 10px; width: 100%; min-height: 40px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--accent); font-size: 14px; font-weight: 700; cursor: pointer; }
+.load-more-button:disabled { opacity: 0.55; cursor: wait; }
 .follow-list { list-style: none; margin: 18px 0 0; padding: 0; border-top: 1px solid var(--border); }
 .follow-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .follow-identity { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; padding: 4px 0; text-align: left; cursor: pointer; color: inherit; }

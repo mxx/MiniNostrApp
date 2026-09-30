@@ -37,6 +37,23 @@ type PublishStatus = {
   pending: number;
 };
 
+/** 作者页单独拉取的历史帖子：与主时间线的 MAX_EVENTS 上限隔离。 */
+type AuthorHistory = {
+  pubkey: string;
+  events: NostrEvent[];
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+};
+
+/** 进行中的作者历史请求：跟踪每个订阅 id 收到的条数与 EOSE。 */
+type AuthorHistoryRequest = {
+  pubkey: string;
+  subIds: Set<string>;
+  counts: Map<string, number>;
+  mode: "initial" | "more";
+};
+
 type Profile = {
   name?: string;
   display_name?: string;
@@ -289,6 +306,36 @@ export function applyFilters(events: NostrEvent[], filters: FeedFilters): NostrE
     }
     return true;
   });
+}
+
+/** 作者页历史拉取：每次最多取这么多条，relay 有更多时用 until 分页。 */
+export const AUTHOR_HISTORY_LIMIT = 200;
+
+/** 作者历史订阅的过滤器：按作者拉 kind-1；until 用于分页加载更早的帖子。 */
+export function buildAuthorHistoryFilter(
+  pubkey: string,
+  until?: number,
+): { kinds: number[]; authors: string[]; limit: number; until?: number } {
+  const filter: { kinds: number[]; authors: string[]; limit: number; until?: number } = {
+    kinds: [1],
+    authors: [pubkey],
+    limit: AUTHOR_HISTORY_LIMIT,
+  };
+  if (typeof until === "number") filter.until = until;
+  return filter;
+}
+
+/** 合并作者历史帖子：按 id 去重，按时间倒序；不改动传入的数组。 */
+export function mergeHistoryEvents(current: NostrEvent[], incoming: NostrEvent[]): NostrEvent[] {
+  const seen = new Set<string>();
+  const merged: NostrEvent[] = [];
+  for (const event of [...current, ...incoming]) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event);
+  }
+  merged.sort((a, b) => b.created_at - a.created_at);
+  return merged;
 }
 
 /** NIP-10 回复标签：e 标签带资讯源提示与 reply 标记，p 标签指向原作者。 */
@@ -676,6 +723,8 @@ export function App() {
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [detailEventId, setDetailEventId] = useState<string | null>(null);
   const [profilePubkey, setProfilePubkey] = useState<string | null>(null);
+  const [authorHistory, setAuthorHistory] = useState<AuthorHistory | null>(null);
+  const authorHistoryRef = useRef<AuthorHistoryRequest | null>(null);
   const [copyMessage, setCopyMessage] = useState("");
   const [profileCache, setProfileCache] = useState<Record<string, ProfileEntry>>(loadProfileCache);
   const [follows, setFollows] = useState<string[]>(() => loadStoredFollows(null));
@@ -718,7 +767,12 @@ export function App() {
   const enabledRelays = useMemo(() => relays.filter((relay) => relay.enabled), [relays]);
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;
   const detailEvent = detailEventId ? events.find((event) => event.id === detailEventId) ?? null : null;
-  const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
+  const profileEvents = useMemo(() => {
+    if (!profilePubkey) return [];
+    const history = authorHistory && authorHistory.pubkey === profilePubkey ? authorHistory.events : [];
+    const fromFeed = events.filter((event) => event.pubkey === profilePubkey);
+    return mergeHistoryEvents(history, fromFeed);
+  }, [profilePubkey, events, authorHistory]);
   const feedEvents = viewMode === "manual" ? manualEvents : events;
   const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
   // 本地筛选（隐藏回复 / 关键词屏蔽）：只影响展示，不改变订阅。
@@ -801,6 +855,86 @@ export function App() {
     setDetailEventId(null);
     setProfilePubkey(key);
     setCopyMessage("");
+    requestAuthorHistory(key);
+  }
+
+  function closeAuthorHistorySubs(): void {
+    const request = authorHistoryRef.current;
+    if (!request) return;
+    for (const subId of request.subIds) {
+      for (const socket of socketsRef.current.values()) {
+        if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify(["CLOSE", subId]));
+          } catch {
+            // Ignore close failures; the relay will time the sub out.
+          }
+        }
+      }
+    }
+    authorHistoryRef.current = null;
+  }
+
+  /** 作者页打开后单独订阅该作者的 kind-1；until 用于分页加载更早。 */
+  function requestAuthorHistory(pubkey: string, until?: number): void {
+    closeAuthorHistorySubs();
+    const mode = typeof until === "number" ? "more" : "initial";
+    if (mode === "initial") {
+      setAuthorHistory({ pubkey, events: [], loading: true, loadingMore: false, hasMore: false });
+    } else {
+      setAuthorHistory((prev) => (prev && prev.pubkey === pubkey ? { ...prev, loadingMore: true } : prev));
+    }
+    const filter = buildAuthorHistoryFilter(pubkey, until);
+    const subIds = new Set<string>();
+    const counts = new Map<string, number>();
+    for (const socket of socketsRef.current.values()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      const subId = `author-${createUuid().slice(0, 8)}`;
+      try {
+        socket.send(JSON.stringify(["REQ", subId, filter]));
+        subIds.add(subId);
+        counts.set(subId, 0);
+      } catch {
+        // Skip a socket that refuses the request.
+      }
+    }
+    const request: AuthorHistoryRequest = { pubkey, subIds, counts, mode };
+    authorHistoryRef.current = request;
+    if (subIds.size === 0) {
+      finishAuthorHistory(pubkey);
+      return;
+    }
+    // 兜底：个别资讯源不回 EOSE 时，15 秒后也结束 loading，避免一直转圈。
+    window.setTimeout(() => {
+      if (authorHistoryRef.current === request) finishAuthorHistory(pubkey);
+    }, 15000);
+  }
+
+  /** 收齐（或超时）后结束一次作者历史请求；有源返回满 limit 即认为还有更早。 */
+  function finishAuthorHistory(pubkey: string): void {
+    const request = authorHistoryRef.current;
+    if (!request || request.pubkey !== pubkey) return;
+    const hitLimit = [...request.counts.values()].some((count) => count >= AUTHOR_HISTORY_LIMIT);
+    authorHistoryRef.current = null;
+    setAuthorHistory((prev) =>
+      prev && prev.pubkey === pubkey
+        ? { ...prev, loading: false, loadingMore: false, hasMore: prev.hasMore || hitLimit }
+        : prev,
+    );
+  }
+
+  // 作者页关闭时收回历史订阅并清空历史，避免后台继续收该作者的事件。
+  useEffect(() => {
+    if (profilePubkey) return;
+    closeAuthorHistorySubs();
+    setAuthorHistory(null);
+  }, [profilePubkey]);
+
+  /** 「加载更早」：以当前最老一条的 created_at 为 until 继续往前翻。 */
+  function loadMoreAuthorHistory(): void {
+    if (!profilePubkey) return;
+    const oldest = profileEvents.length > 0 ? profileEvents[profileEvents.length - 1] : undefined;
+    if (oldest) requestAuthorHistory(profilePubkey, oldest.created_at - 1);
   }
 
   async function copyValue(value: string, label: string) {
@@ -929,12 +1063,27 @@ export function App() {
               if (!Array.isArray(frame)) return;
               if (frame[0] === "EVENT" && typeof frame[1] === "string") {
                 const incoming = frame[2];
-                if (frame[1] === subId && isNostrEvent(incoming, 1)) {
+                const historyRequest = authorHistoryRef.current;
+                if (historyRequest && historyRequest.subIds.has(frame[1]) && isNostrEvent(incoming, 1)) {
+                  historyRequest.counts.set(frame[1], (historyRequest.counts.get(frame[1]) ?? 0) + 1);
+                  const historyEvent: NostrEvent = { ...incoming, relays: [relay.url] };
+                  const wanted = historyRequest.pubkey;
+                  setAuthorHistory((prev) => (prev && prev.pubkey === wanted
+                    ? { ...prev, events: mergeHistoryEvents(prev.events, [historyEvent]) }
+                    : prev));
+                } else if (frame[1] === subId && isNostrEvent(incoming, 1)) {
                   addIncomingEvent(incoming, relay.url);
                 } else if (profileSubsRef.current.has(frame[1]) && isNostrEvent(incoming, 0)) {
                   addProfile(incoming);
                 } else if (frame[1] === contactSubRef.current && isNostrEvent(incoming, 3)) {
                   addContactList(incoming);
+                }
+              }
+              if (frame[0] === "EOSE" && typeof frame[1] === "string") {
+                const historyRequest = authorHistoryRef.current;
+                if (historyRequest && historyRequest.subIds.has(frame[1])) {
+                  historyRequest.subIds.delete(frame[1]);
+                  if (historyRequest.subIds.size === 0) finishAuthorHistory(historyRequest.pubkey);
                 }
               }
               if (frame[0] === "OK" && typeof frame[1] === "string" && typeof frame[2] === "boolean") {
@@ -1255,7 +1404,7 @@ export function App() {
               <h3>发帖与回复</h3>
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
               <h3>关注</h3>
-              <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。</p>
+              <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
               <h3>筛选</h3>
               <p>点标题栏的漏斗图标打开筛选：可以隐藏回复、按关键词屏蔽帖子，只影响本机展示，不改变订阅。只看关注的人请用「全部 / 关注」标签页。筛选条件会自动记住。</p>
               <h3>版本更新</h3>
@@ -1402,13 +1551,26 @@ export function App() {
             </div>
             {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
             <div className="profile-posts">
-              <h3>当前已加载的帖子 <span>{profileEvents.length}</span></h3>
-              {profileEvents.map((item) => (
-                <button key={item.id} onClick={() => openNote(item.id)}>
-                  <span>{item.content.trim() || "（空文本）"}</span>
-                  <small>{relativeTime(item.created_at)} · {shortKey(encodeNip19("note", item.id))}</small>
+              <h3>帖子 <span>{profileEvents.length}</span></h3>
+              {profilePubkey && authorHistory?.pubkey === profilePubkey && authorHistory.loading && profileEvents.length === 0 ? (
+                <p className="profile-history-hint">正在从资讯源拉取他的历史帖子…</p>
+              ) : (
+                profileEvents.map((item) => (
+                  <button key={item.id} onClick={() => openNote(item.id)}>
+                    <span>{item.content.trim() || "（空文本）"}</span>
+                    <small>{relativeTime(item.created_at)} · {shortKey(encodeNip19("note", item.id))}</small>
+                  </button>
+                ))
+              )}
+              {profilePubkey && authorHistory?.pubkey === profilePubkey && !authorHistory.loading && authorHistory.hasMore && (
+                <button
+                  className="load-more-button"
+                  disabled={authorHistory.loadingMore}
+                  onClick={loadMoreAuthorHistory}
+                >
+                  {authorHistory.loadingMore ? "加载中…" : "加载更早的帖子"}
                 </button>
-              ))}
+              )}
             </div>
           </section>
         </div>
