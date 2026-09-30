@@ -227,6 +227,70 @@ export function saveIncognitoMode(enabled: boolean): void {
   }
 }
 
+// ---- 本地筛选：隐藏回复 / 关键词屏蔽（只看关注已有 全部/关注 标签页）----
+
+export type FeedFilters = {
+  hideReplies: boolean;
+  mutedKeywords: string[];
+};
+
+const FILTERS_STORAGE_KEY = "nostr-min-filters-v1";
+
+const DEFAULT_FILTERS: FeedFilters = { hideReplies: false, mutedKeywords: [] };
+
+export function loadFilters(): FeedFilters {
+  try {
+    const raw = localStorage.getItem(FILTERS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_FILTERS, mutedKeywords: [] };
+    const parsed = JSON.parse(raw) as Partial<FeedFilters>;
+    return {
+      hideReplies: parsed.hideReplies === true,
+      mutedKeywords: Array.isArray(parsed.mutedKeywords)
+        ? parsed.mutedKeywords
+            .filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim().length > 0)
+            .map((keyword) => keyword.trim())
+            .slice(0, 50)
+        : [],
+    };
+  } catch {
+    return { ...DEFAULT_FILTERS, mutedKeywords: [] };
+  }
+}
+
+export function saveFilters(filters: FeedFilters): void {
+  try {
+    localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  } catch {
+    // private mode — keep the choice in memory only
+  }
+}
+
+/** NIP-10：带有效 e 标签的 kind-1 视为回复（参与了某个帖子串）。 */
+export function isReplyEvent(event: NostrEvent): boolean {
+  return (event.tags ?? []).some((tag) => tag[0] === "e" && typeof tag[1] === "string" && tag[1].length > 0);
+}
+
+export function filtersActive(filters: FeedFilters): boolean {
+  return filters.hideReplies || filters.mutedKeywords.length > 0;
+}
+
+/**
+ * 本地筛选帖子：隐藏回复 / 屏蔽关键词（大小写不敏感的子串匹配）。
+ * 纯本地过滤，不改变订阅与网络行为。
+ */
+export function applyFilters(events: NostrEvent[], filters: FeedFilters): NostrEvent[] {
+  if (!filtersActive(filters)) return events;
+  const keywords = filters.mutedKeywords.map((keyword) => keyword.toLowerCase());
+  return events.filter((event) => {
+    if (filters.hideReplies && isReplyEvent(event)) return false;
+    if (keywords.length > 0) {
+      const content = event.content.toLowerCase();
+      if (keywords.some((keyword) => content.includes(keyword))) return false;
+    }
+    return true;
+  });
+}
+
 /** NIP-10 回复标签：e 标签带资讯源提示与 reply 标记，p 标签指向原作者。 */
 export function buildReplyTags(parent: { id: string; pubkey: string; relays: string[] }): string[][] {
   const hint = parent.relays.find((relay) => relay.startsWith("ws")) ?? "";
@@ -506,7 +570,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "download" | "help" | "incognito" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "download" | "help" | "incognito" | "filter" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -518,6 +582,7 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "download") return <svg {...common}><path d="M12 4v10"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>;
   if (name === "help") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1.1.9-1.1 1.9"/><path d="M12 17h.01"/></svg>;
   if (name === "incognito") return <svg {...common}><path d="M3 3l18 18"/><path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c7 0 10 7 10 7a17 17 0 0 1-2.9 3.9"/><path d="M6.6 6.6A16.5 16.5 0 0 0 2 12s3 7 10 7c1.5 0 2.9-.3 4.1-.8"/></svg>;
+  if (name === "filter") return <svg {...common}><path d="M4 5h16l-6.2 7.2V19l-3.6 2v-8.8L4 5z"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
@@ -619,6 +684,9 @@ export function App() {
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   const [incognitoMode, setIncognitoMode] = useState<boolean>(loadIncognitoMode);
+  const [filters, setFilters] = useState<FeedFilters>(loadFilters);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [keywordDraft, setKeywordDraft] = useState("");
   const [manualEvents, setManualEvents] = useState<NostrEvent[]>(() => loadCachedEvents());
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const socketsRef = useRef<Map<string, WebSocket>>(new Map());
@@ -653,6 +721,9 @@ export function App() {
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
   const feedEvents = viewMode === "manual" ? manualEvents : events;
   const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
+  // 本地筛选（隐藏回复 / 关键词屏蔽）：只影响展示，不改变订阅。
+  const displayEvents = useMemo(() => applyFilters(visibleEvents, filters), [visibleEvents, filters]);
+  const hiddenByFilters = visibleEvents.length - displayEvents.length;
   const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
   const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
 
@@ -670,7 +741,7 @@ export function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [viewMode]);
-  const autoGridItems = autoGridWindow(visibleEvents, gridCapacity.count);
+  const autoGridItems = autoGridWindow(displayEvents, gridCapacity.count);
 
 
   // 浏览模式持久化；切到手动模式时冻结当前快照。
@@ -682,6 +753,11 @@ export function App() {
   useEffect(() => {
     saveIncognitoMode(incognitoMode);
   }, [incognitoMode]);
+
+  // 筛选条件持久化。
+  useEffect(() => {
+    saveFilters(filters);
+  }, [filters]);
 
   useEffect(() => {
     if (viewMode === "manual") setManualEvents(eventsRef.current);
@@ -700,6 +776,25 @@ export function App() {
     setProfilePubkey(null);
     setDetailEventId(eventId);
     setCopyMessage("");
+  }
+
+  function addMutedKeyword() {
+    const keyword = keywordDraft.trim();
+    if (!keyword) return;
+    setFilters((prev) =>
+      prev.mutedKeywords.some((existing) => existing.toLowerCase() === keyword.toLowerCase())
+        ? prev
+        : { ...prev, mutedKeywords: [...prev.mutedKeywords, keyword].slice(0, 50) },
+    );
+    setKeywordDraft("");
+  }
+
+  function removeMutedKeyword(keyword: string) {
+    setFilters((prev) => ({ ...prev, mutedKeywords: prev.mutedKeywords.filter((existing) => existing !== keyword) }));
+  }
+
+  function clearFilters() {
+    setFilters({ hideReplies: false, mutedKeywords: [] });
   }
 
   function openProfile(key: string) {
@@ -1014,6 +1109,14 @@ export function App() {
           >
             <Icon name="incognito" />
           </button>
+          <button
+            className={`icon-button${filtersActive(filters) ? " active" : ""}`}
+            onClick={() => setFilterOpen(true)}
+            aria-label="筛选帖子"
+            title={filtersActive(filters) ? "筛选已开启：隐藏回复 / 屏蔽关键词" : "筛选帖子：隐藏回复、屏蔽关键词"}
+          >
+            <Icon name="filter" />
+          </button>
           <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明"><Icon name="help" /></button>
           <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载"><Icon name="download" /></button>
           <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
@@ -1062,18 +1165,18 @@ export function App() {
           </div>
         </div>
 
-        {visibleEvents.length === 0 ? (
+        {displayEvents.length === 0 ? (
           <section className="empty-state">
             <div className="empty-signal"><span /><span /><span /></div>
-            <h2>{feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
-            <p>{feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开资讯源面板查看每个地址的状态，或添加一个可用资讯源。"}</p>
-            <button onClick={() => feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? (viewMode === "manual" ? refreshManualFeed() : setConnectionEpoch((value) => value + 1)) : setPanelOpen(true)}>
-              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理资讯源"}
+            <h2>{hiddenByFilters > 0 ? "筛选隐藏了全部帖子" : feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
+            <p>{hiddenByFilters > 0 ? `${hiddenByFilters} 条帖子被当前筛选条件隐藏。` : feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开资讯源面板查看每个地址的状态，或添加一个可用资讯源。"}</p>
+            <button onClick={() => hiddenByFilters > 0 ? setFilters({ hideReplies: false, mutedKeywords: [] }) : feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? (viewMode === "manual" ? refreshManualFeed() : setConnectionEpoch((value) => value + 1)) : setPanelOpen(true)}>
+              {hiddenByFilters > 0 ? "清除筛选" : feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理资讯源"}
             </button>
           </section>
         ) : viewMode === "manual" ? (
           <ol className="feed-list" aria-live="polite">
-            {visibleEvents.map((item) => (
+            {displayEvents.map((item) => (
               <li className="note" key={item.id}>
                 <NoteCard item={item} profileCache={profileCache} incognito={incognitoMode} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
               </li>
@@ -1091,7 +1194,7 @@ export function App() {
               </ol>
             </div>
             <div className="auto-bar">
-              <span className="auto-count">{visibleEvents.length} 条帖子</span>
+              <span className="auto-count">{displayEvents.length} 条帖子{hiddenByFilters > 0 ? `（${hiddenByFilters} 条被筛选隐藏）` : ""}</span>
               <span className="auto-hint">新帖自动进入左上角</span>
             </div>
           </section>
@@ -1153,6 +1256,8 @@ export function App() {
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
               <h3>关注</h3>
               <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。</p>
+              <h3>筛选</h3>
+              <p>点标题栏的漏斗图标打开筛选：可以隐藏回复、按关键词屏蔽帖子，只影响本机展示，不改变订阅。只看关注的人请用「全部 / 关注」标签页。筛选条件会自动记住。</p>
               <h3>版本更新</h3>
               <p>点标题栏的下载图标会清空本地缓存并重新下载最新版，页面会自动重载。</p>
               <h3>离线使用</h3>
@@ -1160,6 +1265,59 @@ export function App() {
               <h3>隐身模式</h3>
               <p>点标题栏的面具图标打开隐身模式：远程头像不再自动加载，只显示首字母，避免向头像服务器暴露你的浏览行为。缺省是普通模式，头像自动加载。选择会自动记住。</p>
             </div>
+          </aside>
+        </div>
+      )}
+
+      {filterOpen && (
+        <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setFilterOpen(false); }}>
+          <aside className="relay-sheet" aria-label="筛选帖子" role="dialog" aria-modal="true">
+            <div className="sheet-heading">
+              <div><p className="section-index">FILTERS</p><h2>筛选</h2></div>
+              <button className="icon-button" onClick={() => setFilterOpen(false)} aria-label="关闭筛选"><Icon name="close" /></button>
+            </div>
+            <p className="sheet-copy">只影响本机展示，不改变订阅。只看关注请用「全部 / 关注」标签页。</p>
+            <label className="filter-row">
+              <input
+                type="checkbox"
+                checked={filters.hideReplies}
+                onChange={(event) => setFilters((prev) => ({ ...prev, hideReplies: event.target.checked }))}
+              />
+              <span><strong>隐藏回复</strong><small>不显示参与帖子串的回复（带 e 标签的帖子）</small></span>
+            </label>
+            <div className="filter-section">
+              <strong>屏蔽关键词</strong>
+              <small>帖子内容包含以下任意词（不区分大小写）即隐藏</small>
+              <form
+                className="keyword-add"
+                onSubmit={(event) => { event.preventDefault(); addMutedKeyword(); }}
+              >
+                <input
+                  type="text"
+                  value={keywordDraft}
+                  onChange={(event) => setKeywordDraft(event.target.value)}
+                  placeholder="输入关键词，回车添加"
+                  aria-label="屏蔽关键词"
+                  maxLength={40}
+                />
+                <button type="submit">添加</button>
+              </form>
+              {filters.mutedKeywords.length > 0 ? (
+                <ul className="keyword-list">
+                  {filters.mutedKeywords.map((keyword) => (
+                    <li key={keyword} className="keyword-chip">
+                      <span>{keyword}</span>
+                      <button onClick={() => removeMutedKeyword(keyword)} aria-label={`移除屏蔽词 ${keyword}`}>×</button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">还没有屏蔽词。</p>
+              )}
+            </div>
+            {filtersActive(filters) && (
+              <button className="filter-clear" onClick={clearFilters}>清除全部筛选</button>
+            )}
           </aside>
         </div>
       )}

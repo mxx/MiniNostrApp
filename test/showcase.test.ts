@@ -168,8 +168,9 @@ describe("自动网格样式（显示回归）", () => {
 });
 
 describe("App 接线（自动网格 / 回复 / 帮助）", () => {
-  test("自动网格不做定时轮换，始终按当前时间倒序窗口渲染", () => {
-    expect(appSrc).toContain("autoGridWindow(visibleEvents, gridCapacity.count)");
+  test("自动网格不做定时轮换，始终按当前时间倒序窗口渲染（经本地筛选）", () => {
+    expect(appSrc).toContain("autoGridWindow(displayEvents, gridCapacity.count)");
+    expect(appSrc).toContain("applyFilters(visibleEvents, filters)");
     expect(appSrc).not.toContain("setInterval");
     expect(appSrc).not.toContain("AUTO_GRID_STEP_MS");
     expect(appSrc).not.toContain("autoHead");
