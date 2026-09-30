@@ -207,6 +207,33 @@ h2 { font-size: 24px; line-height: 1.08; }
 .detail-author strong { overflow: hidden; text-overflow: ellipsis; font: 700 13px/1.25 ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .detail-author small { color: var(--dim); font-size: 12px; }
 .detail-content { padding: 22px 0; overflow-wrap: anywhere; font-size: 17px; line-height: 1.68; }
+.longform-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 20px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 750; }
+.longform-open { width: 100%; display: grid; gap: 8px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.longform-open strong { font-size: 17px; letter-spacing: -0.01em; line-height: 1.4; }
+.longform-open > span { color: var(--dim); font-size: 14px; line-height: 1.6; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.longform-note { display: flex; flex-direction: column; gap: 10px; }
+.longform-list { grid-template-columns: minmax(0, 1fr); }
+.longform-cover { width: 100%; border-radius: 12px; margin-top: 18px; }
+.longform-cover-hint { margin: 18px 0 0; font-size: 13px; }
+.longform-cover-hint a { color: var(--accent); font-weight: 700; }
+.longform-body { padding: 18px 0 6px; overflow-wrap: anywhere; font-size: 16.5px; line-height: 1.75; }
+.longform-body > :first-child { margin-top: 0; }
+.longform-body > :last-child { margin-bottom: 0; }
+.longform-body h1, .longform-body h2, .longform-body h3, .longform-body h4 { margin: 1.4em 0 0.6em; letter-spacing: -0.015em; line-height: 1.35; }
+.longform-body h1 { font-size: 1.5em; }
+.longform-body h2 { font-size: 1.32em; }
+.longform-body h3 { font-size: 1.16em; }
+.longform-body h4 { font-size: 1.02em; }
+.longform-body p { margin: 0.85em 0; }
+.longform-body a { color: var(--accent); overflow-wrap: anywhere; }
+.longform-body ul, .longform-body ol { margin: 0.85em 0; padding-left: 1.5em; }
+.longform-body li { margin: 0.3em 0; }
+.longform-body blockquote { margin: 0.85em 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--border); color: var(--dim); }
+.longform-body pre { margin: 0.85em 0; padding: 12px 14px; border-radius: 10px; background: var(--surface); overflow-x: auto; font-size: 13.5px; line-height: 1.6; }
+.longform-body code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.longform-body p code, .longform-body li code { padding: 1px 6px; border-radius: 6px; background: var(--surface); font-size: 0.88em; }
+.longform-body img { max-width: 100%; border-radius: 10px; }
+.longform-body hr { margin: 1.4em 0; border: 0; border-top: 1px solid var(--border); }
 .event-facts { margin: 0; border-top: 1px solid var(--border); }
 .event-facts > div { padding: 14px 0; border-bottom: 1px solid var(--border); }
 .event-facts dt { margin-bottom: 7px; color: var(--dim); font-size: 12px; font-weight: 700; }

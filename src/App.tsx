@@ -299,6 +299,13 @@ export function applyFilters(events: NostrEvent[], filters: FeedFilters): NostrE
   if (!filtersActive(filters)) return events;
   const keywords = filters.mutedKeywords.map((keyword) => keyword.toLowerCase());
   return events.filter((event) => {
+    if (event.kind === LONGFORM_KIND) {
+      // 长文没有回复概念；关键词对标题、摘要、正文都生效。
+      if (keywords.length === 0) return true;
+      const meta = parseLongformMeta(event);
+      const haystack = `${meta.title}\n${meta.summary}\n${event.content}`.toLowerCase();
+      return !keywords.some((keyword) => haystack.includes(keyword));
+    }
     if (filters.hideReplies && isReplyEvent(event)) return false;
     if (keywords.length > 0) {
       const content = event.content.toLowerCase();
@@ -336,6 +343,241 @@ export function mergeHistoryEvents(current: NostrEvent[], incoming: NostrEvent[]
   }
   merged.sort((a, b) => b.created_at - a.created_at);
   return merged;
+}
+
+/** NIP-23 长文事件 kind。 */
+export const LONGFORM_KIND = 30023;
+/** 长文订阅每源最多取这么多条。 */
+export const LONGFORM_LIMIT = 20;
+/** 本地缓存的长文上限。 */
+export const MAX_LONGFORMS = 40;
+const LONGFORM_STORAGE_KEY = "nostr-min-longforms-v1";
+
+export type LongformMeta = {
+  title: string;
+  summary: string;
+  image: string;
+  publishedAt: number | null;
+  identifier: string;
+};
+
+function longformTagValue(event: NostrEvent, name: string): string {
+  const tag = event.tags.find((tag) => tag[0] === name && typeof tag[1] === "string");
+  return tag?.[1] ?? "";
+}
+
+/** NIP-23 长文元数据：从标签取 title / summary / image / published_at / d。 */
+export function parseLongformMeta(event: NostrEvent): LongformMeta {
+  const publishedRaw = longformTagValue(event, "published_at");
+  const publishedNum = publishedRaw ? Number(publishedRaw) : NaN;
+  return {
+    title: longformTagValue(event, "title"),
+    summary: longformTagValue(event, "summary"),
+    image: longformTagValue(event, "image"),
+    publishedAt: Number.isFinite(publishedNum) ? publishedNum : null,
+    identifier: longformTagValue(event, "d"),
+  };
+}
+
+/** NIP-33 可替换事件键：同 kind + pubkey + d 标签只保留最新一条。 */
+export function longformKey(event: NostrEvent): string {
+  return `${event.kind}:${event.pubkey}:${longformTagValue(event, "d")}`;
+}
+
+/** 合并长文：按 longformKey 去重，同键只保留 created_at 最大的；按时间倒序。 */
+export function mergeLongformEvents(current: NostrEvent[], incoming: NostrEvent[]): NostrEvent[] {
+  const byKey = new Map<string, NostrEvent>();
+  for (const event of [...current, ...incoming]) {
+    const key = longformKey(event);
+    const existing = byKey.get(key);
+    if (!existing || event.created_at > existing.created_at) {
+      const relays = existing && event.created_at === existing.created_at
+        ? [...new Set([...existing.relays, ...event.relays])]
+        : event.relays;
+      byKey.set(key, { ...event, relays });
+    } else if (!existing.relays.includes(event.relays[0] ?? "")) {
+      byKey.set(key, { ...existing, relays: [...existing.relays, ...event.relays] });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => b.created_at - a.created_at);
+}
+
+/** 长文摘要：优先用 summary 标签，否则取正文前 140 字。 */
+export function longformExcerpt(event: NostrEvent): string {
+  const meta = parseLongformMeta(event);
+  if (meta.summary) return meta.summary;
+  const text = event.content.replace(/\s+/g, " ").trim();
+  return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+}
+
+export function loadCachedLongforms(): NostrEvent[] {
+  try {
+    const raw = localStorage.getItem(LONGFORM_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (entry): entry is NostrEvent =>
+          !!entry &&
+          typeof entry === "object" &&
+          (entry as { kind?: unknown }).kind === LONGFORM_KIND &&
+          typeof (entry as { id?: unknown }).id === "string" &&
+          typeof (entry as { pubkey?: unknown }).pubkey === "string" &&
+          typeof (entry as { content?: unknown }).content === "string" &&
+          typeof (entry as { created_at?: unknown }).created_at === "number",
+      )
+      .map((entry) => ({
+        ...entry,
+        tags: Array.isArray(entry.tags) ? entry.tags : [],
+        relays: Array.isArray(entry.relays) ? entry.relays : [],
+      }))
+      .slice(0, MAX_LONGFORMS);
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedLongforms(events: NostrEvent[]): void {
+  try {
+    localStorage.setItem(LONGFORM_STORAGE_KEY, JSON.stringify(events.slice(0, MAX_LONGFORMS)));
+  } catch {
+    // quota exceeded or private mode — the live feed still works
+  }
+}
+
+/** 转义 HTML：渲染器只输出白名单标签，先把原文全部转义再组装。 */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 只允许 http(s) 链接与图片，其他协议一律按纯文本处理。 */
+export function isSafeHttpUrl(url: string): boolean {
+  return /^https?:\/\/[^\s"'<>]+$/i.test(url.trim());
+}
+
+/** 行内 markdown：行内代码、图片、链接、裸 URL、粗体、斜体。输入须已转义。 */
+function renderLongformInline(source: string, allowImages: boolean): string {
+  const slots: string[] = [];
+  const stash = (html: string): string => {
+    slots.push(html);
+    return `\ue000${slots.length - 1}\ue000`;
+  };
+  let out = source;
+  // 行内代码优先，避免其中的 markdown 语法被解释。
+  out = out.replace(/`([^`\n]+)`/g, (_match, code: string) => stash(`<code>${code}</code>`));
+  // 图片：隐身模式下不自动加载，只给链接。
+  out = out.replace(/!\[([^\]\n]*)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_match, alt: string, url: string) => {
+    if (!isSafeHttpUrl(url)) return `![${alt}](${url})`;
+    return allowImages
+      ? stash(`<img src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`)
+      : stash(`<a href="${url}" target="_blank" rel="noreferrer">🖼 图片（隐身模式未加载）</a>`);
+  });
+  // 链接
+  out = out.replace(/\[([^\]\n]+)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_match, text: string, url: string) => {
+    if (!isSafeHttpUrl(url)) return text;
+    return stash(`<a href="${url}" target="_blank" rel="noreferrer">${text}</a>`);
+  });
+  // 裸 URL 自动成链：中英文标点不算 URL 的一部分
+  out = out.replace(/(^|[\s（(>])((?:https?:\/\/)[^\s<>"）)。，；：？！、」』\]]+)/gi, (_match, pre: string, url: string) => {
+    const clean = url.replace(/[。，；：？！、」』）,.!?;:)\]}]+$/, "");
+    const trail = url.slice(clean.length);
+    return `${pre}${stash(`<a href="${clean}" target="_blank" rel="noreferrer">${clean}</a>`)}${trail}`;
+  });
+  // 粗体、斜体
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  return out.replace(/\ue000(\d+)\ue000/g, (_match, index: string) => slots[Number(index)] ?? "");
+}
+
+function isLongformBlockStart(line: string): boolean {
+  return (
+    /^\s*```/.test(line) ||
+    /^(#{1,6})\s+/.test(line) ||
+    /^\s*([-*_]\s*){3,}$/.test(line) ||
+    /^\s*&gt;/.test(line) ||
+    /^(\s*)([-*+]|\d+[.)])\s+/.test(line)
+  );
+}
+
+/**
+ * 长文 markdown 子集渲染（标题、分隔线、引用、列表、代码围栏、段落）。
+ * 先转义全部 HTML，只输出白名单标签；链接与图片只放行 http(s)。
+ * 表格等复杂语法暂不支持，会按段落原文显示。
+ */
+export function renderMarkdownHtml(source: string, allowImages: boolean): string {
+  const lines = escapeHtml(source).split("\n");
+  const blocks: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] ?? "";
+    // 代码围栏
+    if (/^\s*```/.test(line)) {
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i] ?? "")) {
+        code.push(lines[i] ?? "");
+        i++;
+      }
+      i++;
+      blocks.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      continue;
+    }
+    // 标题
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading && heading[1] && heading[2] !== undefined) {
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${renderLongformInline(heading[2], allowImages)}</h${level}>`);
+      i++;
+      continue;
+    }
+    // 分隔线
+    if (/^\s*([-*_]\s*){3,}$/.test(line)) {
+      blocks.push("<hr>");
+      i++;
+      continue;
+    }
+    // 引用
+    if (/^\s*&gt;/.test(line)) {
+      const quoted: string[] = [];
+      while (i < lines.length && /^\s*&gt;/.test(lines[i] ?? "")) {
+        quoted.push((lines[i] ?? "").replace(/^\s*&gt;\s?/, ""));
+        i++;
+      }
+      blocks.push(`<blockquote>${renderLongformInline(quoted.join("<br>"), allowImages)}</blockquote>`);
+      continue;
+    }
+    // 列表
+    const listMatch = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (listMatch && listMatch[2] && listMatch[3] !== undefined) {
+      const ordered = /^\d/.test(listMatch[2]);
+      const items: string[] = [];
+      let itemMatch: RegExpMatchArray | null;
+      while (i < lines.length && (itemMatch = (lines[i] ?? "").match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/))) {
+        items.push(`<li>${renderLongformInline(itemMatch[3] ?? "", allowImages)}</li>`);
+        i++;
+      }
+      blocks.push(ordered ? `<ol>${items.join("")}</ol>` : `<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    // 空行：段落分隔
+    if (/^\s*$/.test(line)) {
+      i++;
+      continue;
+    }
+    // 段落：连续非空行合并，行内换行保留为 <br>
+    const paragraph: string[] = [];
+    while (i < lines.length && !/^\s*$/.test(lines[i] ?? "") && !isLongformBlockStart(lines[i] ?? "")) {
+      paragraph.push(lines[i] ?? "");
+      i++;
+    }
+    if (paragraph.length > 0) blocks.push(`<p>${renderLongformInline(paragraph.join("<br>"), allowImages)}</p>`);
+  }
+  return blocks.join("\n");
 }
 
 /** NIP-10 回复标签：e 标签带资讯源提示与 reply 标记，p 标签指向原作者。 */
@@ -670,6 +912,40 @@ function AvatarMark({ pubkey, profileCache, incognito, large, onClick, ariaLabel
 }
 
 /** 帖子卡片的共享主体：手动网格与自动网格共用，页脚带回复按钮。 */
+function LongformCard({ item, profileCache, incognito, onOpenProfile, onOpen }: {
+  item: NostrEvent;
+  profileCache: Record<string, ProfileEntry>;
+  incognito: boolean;
+  onOpenProfile: (pubkey: string) => void;
+  onOpen: (event: NostrEvent) => void;
+}) {
+  const meta = parseLongformMeta(item);
+  const publishedAt = meta.publishedAt ?? item.created_at;
+  return (
+    <>
+      <div className="note-meta">
+        <AvatarMark
+          pubkey={item.pubkey}
+          profileCache={profileCache}
+          incognito={incognito}
+          onClick={() => onOpenProfile(item.pubkey)}
+          ariaLabel={`查看作者 ${profileName(item.pubkey, profileCache)}`}
+        />
+        <button className="author" onClick={() => onOpenProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
+        <time dateTime={new Date(publishedAt * 1000).toISOString()}>{relativeTime(publishedAt)}</time>
+        <span className="longform-badge">长文</span>
+      </div>
+      <button className="longform-open" onClick={() => onOpen(item)} aria-label={`阅读长文 ${meta.title || "无标题"}`}>
+        <strong>{meta.title || "（无标题）"}</strong>
+        <span>{longformExcerpt(item) || "（空）"}</span>
+      </button>
+      <div className="note-footer">
+        <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个资讯源`}</span>
+      </div>
+    </>
+  );
+}
+
 function NoteCard({ item, profileCache, incognito, onOpenProfile, onOpenNote, onReply }: {
   item: NostrEvent;
   profileCache: Record<string, ProfileEntry>;
@@ -710,6 +986,8 @@ export function App() {
   const [relays, setRelays] = useState<RelayConfig[]>(loadRelays);
   const [relayStates, setRelayStates] = useState<Record<string, RelayState>>({});
   const [events, setEvents] = useState<NostrEvent[]>(loadCachedEvents);
+  const [longforms, setLongforms] = useState<NostrEvent[]>(loadCachedLongforms);
+  const [longformDetailId, setLongformDetailId] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
@@ -728,7 +1006,7 @@ export function App() {
   const [copyMessage, setCopyMessage] = useState("");
   const [profileCache, setProfileCache] = useState<Record<string, ProfileEntry>>(loadProfileCache);
   const [follows, setFollows] = useState<string[]>(() => loadStoredFollows(null));
-  const [feedTab, setFeedTab] = useState<"all" | "following">("all");
+  const [feedTab, setFeedTab] = useState<"all" | "longform" | "following">("all");
   const [followsOpen, setFollowsOpen] = useState(false);
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
@@ -747,6 +1025,9 @@ export function App() {
   const eventsRef = useRef(events);
   eventsRef.current = events;
   const lastPersistRef = useRef(0);
+  const longformsRef = useRef(longforms);
+  longformsRef.current = longforms;
+  const lastLongformPersistRef = useRef(0);
 
   // Persist the feed (throttled): bursts of incoming notes would otherwise
   // stringify on every event; pagehide flushes the latest state so nothing
@@ -760,6 +1041,20 @@ export function App() {
 
   useEffect(() => {
     const flush = () => saveCachedEvents(eventsRef.current);
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
+
+  // 长文缓存与主时间线分开存，离线也能看已收到的长文。
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastLongformPersistRef.current < 3000) return;
+    lastLongformPersistRef.current = now;
+    saveCachedLongforms(longforms);
+  }, [longforms]);
+
+  useEffect(() => {
+    const flush = () => saveCachedLongforms(longformsRef.current);
     window.addEventListener("pagehide", flush);
     return () => window.removeEventListener("pagehide", flush);
   }, []);
@@ -778,6 +1073,14 @@ export function App() {
   // 本地筛选（隐藏回复 / 关键词屏蔽）：只影响展示，不改变订阅。
   const displayEvents = useMemo(() => applyFilters(visibleEvents, filters), [visibleEvents, filters]);
   const hiddenByFilters = visibleEvents.length - displayEvents.length;
+  // 长文列表：独立订阅、独立展示，关键词筛选对标题/摘要/正文生效。
+  const longformDisplay = useMemo(() => applyFilters(longforms, filters), [longforms, filters]);
+  const longformDetail = longformDetailId ? longforms.find((event) => event.id === longformDetailId) ?? null : null;
+  const longformDetailMeta = longformDetail ? parseLongformMeta(longformDetail) : null;
+  const longformDetailHtml = useMemo(
+    () => (longformDetail ? renderMarkdownHtml(longformDetail.content, !incognitoMode) : ""),
+    [longformDetail, incognitoMode],
+  );
   const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
   const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
 
@@ -963,6 +1266,13 @@ export function App() {
     });
   }, []);
 
+  /** 长文入库：NIP-33 可替换语义，同 kind+pubkey+d 只保留最新版。 */
+  const addLongformEvent = useCallback((incoming: SignedEvent, relayUrl: string) => {
+    setLongforms((current) =>
+      mergeLongformEvents(current, [{ ...incoming, relays: [relayUrl] }]).slice(0, MAX_LONGFORMS),
+    );
+  }, []);
+
   const addProfile = useCallback((incoming: SignedEvent) => {
     const parsed = parseProfileContent(incoming.content);
     if (!parsed) return;
@@ -1050,12 +1360,14 @@ export function App() {
 
       for (const relay of active) {
         const subId = `feed-${createUuid().slice(0, 8)}`;
+        const longformSubId = `longform-${createUuid().slice(0, 8)}`;
         try {
           const socket = new WebSocket(relay.url);
           socketsRef.current.set(relay.url, socket);
           socket.onopen = () => {
             setRelayStates((current) => ({ ...current, [relay.url]: "online" }));
             socket.send(JSON.stringify(["REQ", subId, { kinds: [1], limit: 60 }]));
+            socket.send(JSON.stringify(["REQ", longformSubId, { kinds: [LONGFORM_KIND], limit: LONGFORM_LIMIT }]));
           };
           socket.onmessage = (message) => {
             try {
@@ -1073,6 +1385,8 @@ export function App() {
                     : prev));
                 } else if (frame[1] === subId && isNostrEvent(incoming, 1)) {
                   addIncomingEvent(incoming, relay.url);
+                } else if (frame[1] === longformSubId && isNostrEvent(incoming, LONGFORM_KIND)) {
+                  addLongformEvent(incoming, relay.url);
                 } else if (profileSubsRef.current.has(frame[1]) && isNostrEvent(incoming, 0)) {
                   addProfile(incoming);
                 } else if (frame[1] === contactSubRef.current && isNostrEvent(incoming, 3)) {
@@ -1116,7 +1430,7 @@ export function App() {
       for (const socket of socketsRef.current.values()) socket.close();
       socketsRef.current.clear();
     };
-  }, [relays, connectionEpoch, addIncomingEvent]);
+  }, [relays, connectionEpoch, addIncomingEvent, addLongformEvent]);
 
   async function connectSigner(): Promise<string | null> {
     setSignerError("");
@@ -1298,6 +1612,7 @@ export function App() {
 
         <div className="feed-tabs" role="tablist" aria-label="帖子筛选">
           <button role="tab" aria-selected={feedTab === "all"} className={`feed-tab${feedTab === "all" ? " active" : ""}`} onClick={() => setFeedTab("all")}>全部</button>
+          <button role="tab" aria-selected={feedTab === "longform"} className={`feed-tab${feedTab === "longform" ? " active" : ""}`} onClick={() => setFeedTab("longform")}>长文{longforms.length > 0 ? ` · ${longforms.length}` : ""}</button>
           <button role="tab" aria-selected={feedTab === "following"} className={`feed-tab${feedTab === "following" ? " active" : ""}`} onClick={() => setFeedTab("following")}>关注{follows.length > 0 ? ` · ${follows.length}` : ""}</button>
           {feedTab === "following" && follows.length > 0 && (
             <button className="manage-follows" onClick={() => setFollowsOpen(true)}>管理关注</button>
@@ -1314,7 +1629,24 @@ export function App() {
           </div>
         </div>
 
-        {displayEvents.length === 0 ? (
+        {feedTab === "longform" ? (
+          longformDisplay.length === 0 ? (
+            <section className="empty-state">
+              <div className="empty-signal"><span /><span /><span /></div>
+              <h2>还没有收到长文</h2>
+              <p>{onlineCount > 0 ? "连接已建立，资讯源里的长文会显示在这里。" : "还没有连上资讯源，打开资讯源面板检查连接。"}</p>
+              {onlineCount === 0 && <button onClick={() => setPanelOpen(true)}>管理资讯源</button>}
+            </section>
+          ) : (
+            <ol className="feed-list longform-list" aria-live="polite">
+              {longformDisplay.map((item) => (
+                <li className="note longform-note" key={item.id}>
+                  <LongformCard item={item} profileCache={profileCache} incognito={incognitoMode} onOpenProfile={openProfile} onOpen={(event) => setLongformDetailId(event.id)} />
+                </li>
+              ))}
+            </ol>
+          )
+        ) : displayEvents.length === 0 ? (
           <section className="empty-state">
             <div className="empty-signal"><span /><span /><span /></div>
             <h2>{hiddenByFilters > 0 ? "筛选隐藏了全部帖子" : feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
@@ -1405,6 +1737,8 @@ export function App() {
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
               <h3>关注</h3>
               <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
+              <h3>长文</h3>
+              <p>「长文」标签页显示资讯源里的 NIP-23 长文（kind 30023），每源最多取 20 篇；同作者同标识的长文只保留最新版。点卡片进入全文阅读，支持标题、粗斜体、链接、列表、引用、代码块等排版，表格暂不支持。隐身模式下文章内的图片不会自动加载。</p>
               <h3>筛选</h3>
               <p>点标题栏的漏斗图标打开筛选：可以隐藏回复、按关键词屏蔽帖子，只影响本机展示，不改变订阅。只看关注的人请用「全部 / 关注」标签页。筛选条件会自动记住。</p>
               <h3>版本更新</h3>
@@ -1520,6 +1854,36 @@ export function App() {
             <div className="detail-actions">
               <button className="reply-button" onClick={() => openReply(detailEvent)}><Icon name="reply" />回复这条帖子</button>
             </div>
+            {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
+          </article>
+        </div>
+      )}
+
+      {longformDetail && longformDetailMeta && (
+        <div className="sheet-backdrop detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setLongformDetailId(null); }}>
+          <article className="detail-sheet" role="dialog" aria-modal="true" aria-labelledby="longform-detail-title">
+            <div className="sheet-heading">
+              <div><p className="section-index">KIND 30023 LONGFORM</p><h2 id="longform-detail-title">{longformDetailMeta.title || "长文"}</h2></div>
+              <button className="icon-button" onClick={() => setLongformDetailId(null)} aria-label="关闭长文"><Icon name="close" /></button>
+            </div>
+            <button className="detail-author" onClick={() => { setLongformDetailId(null); openProfile(longformDetail.pubkey); }}>
+              <AvatarMark pubkey={longformDetail.pubkey} profileCache={profileCache} incognito={incognitoMode} />
+              <span><strong>{profileName(longformDetail.pubkey, profileCache)}</strong><small>查看这个作者的帖子</small></span>
+            </button>
+            {longformDetailMeta.image && isSafeHttpUrl(longformDetailMeta.image) && (
+              incognitoMode ? (
+                <p className="longform-cover-hint"><a href={longformDetailMeta.image} target="_blank" rel="noreferrer">🖼 查看封面图（隐身模式未加载）</a></p>
+              ) : (
+                <img className="longform-cover" src={longformDetailMeta.image} alt="" loading="lazy" referrerPolicy="no-referrer" />
+              )
+            )}
+            <div className="longform-body" dangerouslySetInnerHTML={{ __html: longformDetailHtml }} />
+            <dl className="event-facts">
+              <div><dt>发布时间</dt><dd>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date((longformDetailMeta.publishedAt ?? longformDetail.created_at) * 1000))}</dd></div>
+              <div><dt>来源资讯源</dt><dd>{longformDetail.relays.join("、")}</dd></div>
+              <div><dt>事件 ID</dt><dd><code>{encodeNip19("note", longformDetail.id)}</code><button onClick={() => void copyValue(encodeNip19("note", longformDetail.id), "事件 ID")}>复制</button></dd></div>
+              <div><dt>作者公钥</dt><dd><code>{encodeNip19("npub", longformDetail.pubkey)}</code><button onClick={() => void copyValue(encodeNip19("npub", longformDetail.pubkey), "作者公钥")}>复制</button></dd></div>
+            </dl>
             {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
           </article>
         </div>
