@@ -114,10 +114,13 @@ describe("自动轮播样式（显示回归）", () => {
     expect(css).toContain("scale(.8)");
   });
 
-  test("舞台无滚动（overflow hidden）", () => {
+  test("自动模式锁定视口，舞台本身也无滚动", () => {
     const stage = css.match(/\.auto-stage\s*\{([^}]*)\}/)?.[1] ?? "";
+    const shell = css.match(/\.app-shell\.auto-mode\s*\{([^}]*)\}/)?.[1] ?? "";
     expect(stage).toContain("overflow");
     expect(stage).toContain("hidden");
+    expect(shell).toContain("100dvh");
+    expect(shell).toContain("overflow: hidden");
   });
 
   test("新组件类齐全", () => {
@@ -168,6 +171,12 @@ describe("App 接线（自动模式 / 回复）", () => {
 
   test("新帖到达时跳到最新", () => {
     expect(appSrc).toContain("headIdRef");
+  });
+
+  test("手动模式冻结快照，只有刷新按钮主动更新", () => {
+    expect(appSrc).toContain("const [manualEvents, setManualEvents]");
+    expect(appSrc).toContain("function refreshManualFeed()");
+    expect(appSrc).toContain('aria-label="手动刷新帖子"');
   });
 
   test("卡片与详情页都有回复入口", () => {

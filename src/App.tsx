@@ -411,7 +411,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "play" | "pause" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -420,6 +420,8 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "close") return <svg {...common}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   if (name === "plus") return <svg {...common}><path d="M12 5v14M5 12h14"/></svg>;
   if (name === "reply") return <svg {...common}><path d="M8 7 3 12l5 5"/><path d="M3 12h11a7 7 0 0 1 7 7v1"/></svg>;
+  if (name === "play") return <svg {...common}><path d="m8 5 11 7-11 7Z"/></svg>;
+  if (name === "pause") return <svg {...common}><path d="M9 5v14M15 5v14"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
@@ -500,6 +502,7 @@ export function App() {
   const [followsOpen, setFollowsOpen] = useState(false);
   const [followMessage, setFollowMessage] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
+  const [manualEvents, setManualEvents] = useState<NostrEvent[]>(() => loadCachedEvents());
   const [autoIndex, setAutoIndex] = useState(0);
   const [autoPhase, setAutoPhase] = useState<"enter" | "exit">("enter");
   const [autoPaused, setAutoPaused] = useState(false);
@@ -534,9 +537,12 @@ export function App() {
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;
   const detailEvent = detailEventId ? events.find((event) => event.id === detailEventId) ?? null : null;
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
-  const visibleEvents = feedTab === "following" ? events.filter((event) => follows.includes(event.pubkey)) : events;
+  const feedEvents = viewMode === "manual" ? manualEvents : events;
+  const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
   const safeAutoIndex = autoIndex < visibleEvents.length ? autoIndex : 0;
   const currentAuto = visibleEvents[safeAutoIndex] ?? null;
+  const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
+  const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
   const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen;
 
   // 浏览模式持久化；切换模式或筛选页签时轮播回到第一张。
@@ -547,7 +553,13 @@ export function App() {
   useEffect(() => {
     setAutoIndex(0);
     setAutoPhase("enter");
+    if (viewMode === "manual") setManualEvents(eventsRef.current);
   }, [viewMode, feedTab]);
+
+  function refreshManualFeed() {
+    setManualEvents(eventsRef.current);
+    setConnectionEpoch((value) => value + 1);
+  }
 
   // 自动刷新：列表头部出现新帖子时，轮播跳到最新一张。
   const headIdRef = useRef<string | null>(null);
@@ -564,15 +576,19 @@ export function App() {
   // 暂停、弹窗打开或无内容时不推进；鼠标悬停卡片也会暂停（见 auto-stage）。
   useEffect(() => {
     if (viewMode !== "auto" || autoPaused || modalOpen || visibleEvents.length === 0) return;
+    let exitTimer: number | undefined;
     const advanceTimer = window.setTimeout(() => {
       setAutoPhase("exit");
-      window.setTimeout(() => {
+      exitTimer = window.setTimeout(() => {
         setAutoIndex((index) => nextAutoIndex(index, visibleEvents.length));
         setAutoPhase("enter");
       }, AUTO_EXIT_MS);
     }, AUTO_ADVANCE_MS);
-    return () => window.clearTimeout(advanceTimer);
-  }, [viewMode, autoPaused, modalOpen, autoIndex, autoPhase, visibleEvents.length]);
+    return () => {
+      window.clearTimeout(advanceTimer);
+      if (exitTimer !== undefined) window.clearTimeout(exitTimer);
+    };
+  }, [viewMode, autoPaused, modalOpen, autoIndex, visibleEvents.length]);
   const profileEntry = profilePubkey ? profileCache[profilePubkey] : undefined;
   const profileDetail = profileEntry?.profile;
   const isFollowing = profilePubkey ? follows.includes(profilePubkey) : false;
@@ -877,7 +893,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${viewMode === "auto" ? "auto-mode" : "manual-mode"}`}>
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
 
       <header className="utility-bar">
@@ -886,7 +902,7 @@ export function App() {
           <span>{onlineCount}/{enabledRelays.length} 中继在线</span>
         </button>
         <div className="utility-actions">
-          <button className="icon-button" onClick={() => setConnectionEpoch((value) => value + 1)} aria-label="重新连接中继"><Icon name="refresh" /></button>
+          <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接中继"}><Icon name="refresh" /></button>
           <button className="identity-button" onClick={() => void connectSigner()} aria-label={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}>
             <Icon name="key" />
             <span>{pubkey ? shortKey(pubkey) : "连接签名器"}</span>
@@ -894,7 +910,7 @@ export function App() {
         </div>
       </header>
 
-      <main className="feed-column">
+      <main className={`feed-column${viewMode === "auto" ? " auto-feed" : ""}`}>
         <section className="feed-intro" aria-labelledby="feed-heading">
           <div>
             <p className="section-index">PUBLIC NOTES / KIND 1</p>
@@ -920,6 +936,12 @@ export function App() {
           {feedTab === "following" && follows.length > 0 && (
             <button className="manage-follows" onClick={() => setFollowsOpen(true)}>管理关注</button>
           )}
+          {viewMode === "manual" && (
+            <button className="manual-refresh" onClick={refreshManualFeed} aria-label="手动刷新帖子">
+              <Icon name="refresh" />
+              <span>{manualPendingCount > 0 ? `刷新 · ${manualPendingCount} 条新帖` : "刷新"}</span>
+            </button>
+          )}
           <div className="view-switch" role="group" aria-label="浏览模式">
             <button className={`view-option${viewMode === "auto" ? " active" : ""}`} aria-pressed={viewMode === "auto"} onClick={() => setViewMode("auto")}>自动</button>
             <button className={`view-option${viewMode === "manual" ? " active" : ""}`} aria-pressed={viewMode === "manual"} onClick={() => setViewMode("manual")}>手动</button>
@@ -931,8 +953,8 @@ export function App() {
             <div className="empty-signal"><span /><span /><span /></div>
             <h2>{feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上中继"}</h2>
             <p>{feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开中继面板查看每个地址的状态，或添加一个可用中继。"}</p>
-            <button onClick={() => feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? setConnectionEpoch((value) => value + 1) : setPanelOpen(true)}>
-              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? "重新订阅" : "管理中继"}
+            <button onClick={() => feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? (viewMode === "manual" ? refreshManualFeed() : setConnectionEpoch((value) => value + 1)) : setPanelOpen(true)}>
+              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理中继"}
             </button>
           </section>
         ) : viewMode === "manual" ? (
@@ -958,7 +980,7 @@ export function App() {
             )}
             <div className="auto-bar">
               <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续自动轮播" : "暂停自动轮播"}>
-                {autoPaused ? "▶" : "⏸"}
+                <Icon name={autoPaused ? "play" : "pause"} />
               </button>
               <span className="auto-count">{safeAutoIndex + 1} / {visibleEvents.length}</span>
               <span className="auto-hint">悬停暂停 · 新帖自动刷新</span>
