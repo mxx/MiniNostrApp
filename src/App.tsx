@@ -119,20 +119,97 @@ export type ViewMode = "auto" | "manual";
 
 const VIEW_MODE_STORAGE_KEY = "nostr-min-view-mode-v1";
 
-/** 跑马灯行数。 */
-export const MARQUEE_ROWS = 2;
-/** 跑马灯卡片宽度（px），必须与 .marquee-card 的 CSS 宽度一致。 */
-export const MARQUEE_CARD_W = 300;
-/** 跑马灯卡片间距（px），必须与 .marquee-track 的 CSS gap 一致。 */
-export const MARQUEE_GAP = 16;
-/** 单步位移 = 卡片宽 + 间距；循环与前置新帖时按此步长补偿，视觉无跳动。 */
-export const MARQUEE_STEP = MARQUEE_CARD_W + MARQUEE_GAP;
-/** 每行速度（px/秒），方向：从左进入、向右溢出。 */
-export const MARQUEE_SPEEDS = [80, 56];
-/** 跑马灯每行最多保留的帖子数（循环队列上限）。 */
-export const MARQUEE_MAX_NOTES = 60;
-/** 单次新帖超过此数时直接按新帖池重建，避免 offset 左移过远长时间空白。 */
-export const MARQUEE_RESET_THRESHOLD = 12;
+/** 自动网格：卡片最小宽度（px），必须与 .feed-list 的 minmax 下限一致。 */
+export const AUTO_GRID_CARD_MIN_W = 300;
+/** 自动网格：卡片固定高度（px），必须与 .note 的 height 一致。 */
+export const AUTO_GRID_CARD_H = 340;
+/** 自动网格：卡片间距（px），必须与 .feed-list 的 gap 一致。 */
+export const AUTO_GRID_GAP = 12;
+/** 自动网格：每隔多少毫秒整体向前推进一格（从左向右、从上向下）。 */
+export const AUTO_GRID_STEP_MS = 8000;
+
+/**
+ * 按舞台实际尺寸算出能完整放下的列数/行数。
+ * 列数公式与 .feed-list 的 auto-fill 口径一致，避免渲染出放不下的半行。
+ */
+export function autoGridCapacity(stageW: number, stageH: number): { cols: number; rows: number; count: number } {
+  const cols = Math.max(1, Math.floor((stageW + AUTO_GRID_GAP) / (AUTO_GRID_CARD_MIN_W + AUTO_GRID_GAP)));
+  const rows = Math.max(1, Math.floor((stageH + AUTO_GRID_GAP) / (AUTO_GRID_CARD_H + AUTO_GRID_GAP)));
+  return { cols, rows, count: cols * rows };
+}
+
+/**
+ * 取自动网格当前窗口：items 为时间倒序（最新在前），head 为左上角卡片下标；
+ * 窗口按从左向右、从上向下铺满，超出池尾时从池首回绕。
+ */
+export function autoGridWindow<T>(items: T[], head: number, count: number): T[] {
+  if (items.length === 0 || count <= 0) return [];
+  if (items.length <= count) return items.slice();
+  const start = ((head % items.length) + items.length) % items.length;
+  const out: T[] = [];
+  for (let i = 0; i < count; i++) out.push(items[(start + i) % items.length] as T);
+  return out;
+}
+
+/** 自动网格单步推进：head + 1，整张网格的内容向右下方移动一格。 */
+export function nextAutoHead(head: number, length: number): number {
+  return length <= 0 ? 0 : (head + 1) % length;
+}
+
+/**
+ * 池首 id 变化（新帖到达或筛选改变）时返回 true，
+ * 调用方据此把 head 归零，让最新帖回到第一排第一列。
+ */
+export function shouldResetAutoHead(prevFirstId: string | undefined, nextFirstId: string | undefined): boolean {
+  return prevFirstId !== nextFirstId;
+}
+
+declare const __APP_VERSION__: string | undefined;
+/**
+ * 应用版本号：构建时由 build.mjs 经 `git describe` 注入；
+ * 未经构建流程（如 artifact 预览）时回退为 "dev"。
+ */
+export const APP_VERSION =
+  typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__ ? __APP_VERSION__ : "dev";
+
+export interface AppUpdateEnv {
+  caches?: { keys(): Promise<string[]>; delete(name: string): Promise<boolean> };
+  getServiceWorkerRegistrations?: () => Promise<readonly { unregister(): Promise<boolean> }[]>;
+  reload: () => void;
+}
+
+/**
+ * “版本更新”按钮：清掉全部 Cache Storage 与已注册的 Service Worker，
+ * 然后重载页面，强制把应用完整重新下载一遍。
+ * 无论清理成败最后都会重载，避免按钮点下没反应。
+ */
+export async function forceAppUpdate(env: AppUpdateEnv): Promise<void> {
+  try {
+    if (env.caches) {
+      const keys = await env.caches.keys();
+      await Promise.all(keys.map((key) => env.caches!.delete(key)));
+    }
+    if (env.getServiceWorkerRegistrations) {
+      const regs = await env.getServiceWorkerRegistrations();
+      await Promise.all(regs.map((reg) => reg.unregister()));
+    }
+  } catch {
+    // 清理失败不阻塞：照样重载，避免按钮点下没反应。
+  }
+  env.reload();
+}
+
+/** forceAppUpdate 在浏览器里的默认环境：Cache Storage + SW 注册表 + location.reload。 */
+export function defaultUpdateEnv(): AppUpdateEnv {
+  return {
+    caches: typeof window !== "undefined" && "caches" in window ? window.caches : undefined,
+    getServiceWorkerRegistrations:
+      typeof navigator !== "undefined" && "serviceWorker" in navigator
+        ? () => navigator.serviceWorker.getRegistrations()
+        : undefined,
+    reload: () => window.location.reload(),
+  };
+}
 
 export function loadViewMode(): ViewMode {
   try {
@@ -150,31 +227,7 @@ export function saveViewMode(mode: ViewMode): void {
   }
 }
 
-/** 跑马灯向右流动一帧后的偏移：offset 增大，卡片整体向右移动。 */
-export function marqueeStepOffset(offset: number, dtMs: number, speedPxPerSec: number): number {
-  return offset + (speedPxPerSec * dtMs) / 1000;
-}
-
-/**
- * 右端整张卡片完全溢出后，把它搬到最左端继续循环；
- * offset 同步回退一个步长，画面无跳动。不足两张或尚未溢出时原样返回。
- */
-export function marqueeRecycle<T>(items: T[], offset: number, step: number): { items: T[]; offset: number } {
-  if (items.length < 2 || offset < step) return { items, offset };
-  const tail = items[items.length - 1] as T;
-  return { items: [tail, ...items.slice(0, -1)], offset: offset - step };
-}
-
-/**
- * 新帖从左侧进入：在队首前置新帖，同时把 offset 向左移相同步数，
- * 存量卡片的视觉位置保持不动。fresh 为空时原样返回。
- */
-export function marqueePrepend<T>(items: T[], offset: number, fresh: T[], step: number): { items: T[]; offset: number } {
-  if (fresh.length === 0) return { items, offset };
-  return { items: [...fresh, ...items], offset: offset - step * fresh.length };
-}
-
-/** NIP-10 回复标签：e 标签带中继提示与 reply 标记，p 标签指向原作者。 */
+/** NIP-10 回复标签：e 标签带资讯源提示与 reply 标记，p 标签指向原作者。 */
 export function buildReplyTags(parent: { id: string; pubkey: string; relays: string[] }): string[][] {
   const hint = parent.relays.find((relay) => relay.startsWith("ws")) ?? "";
   return [
@@ -438,7 +491,7 @@ export function isNostrEvent(value: unknown, kind: number): value is SignedEvent
   );
 }
 
-function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "play" | "pause" }) {
+function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" | "plus" | "trash" | "reply" | "play" | "pause" | "download" | "help" }) {
   const common = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "relay") return <svg {...common}><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="12" r="7.5"/><path d="M4.7 4.7 7 7M17 17l2.3 2.3M19.3 4.7 17 7M7 17l-2.3 2.3"/></svg>;
   if (name === "refresh") return <svg {...common}><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6.4 6.4L4 11M20 13l-2.4 4.6A7 7 0 0 1 5.8 15"/></svg>;
@@ -449,6 +502,8 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   if (name === "reply") return <svg {...common}><path d="M8 7 3 12l5 5"/><path d="M3 12h11a7 7 0 0 1 7 7v1"/></svg>;
   if (name === "play") return <svg {...common}><path d="m8 5 11 7-11 7Z"/></svg>;
   if (name === "pause") return <svg {...common}><path d="M9 5v14M15 5v14"/></svg>;
+  if (name === "download") return <svg {...common}><path d="M12 4v10"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>;
+  if (name === "help") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1.1.9-1.1 1.9"/><path d="M12 17h.01"/></svg>;
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
@@ -491,7 +546,7 @@ function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
         <ClampedNote content={item.content} />
       </button>
       <div className="note-footer">
-        <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个中继`}</span>
+        <span className="note-relays" title={item.relays.join("\n")}><span className="tiny-signal" />{item.relays.length === 1 ? relayLabel(item.relays[0] ?? "") : `${item.relays.length} 个资讯源`}</span>
         <span className="note-actions">
           <button className="reply-button" onClick={() => onReply(item)} aria-label={`回复 ${profileName(item.pubkey, profileCache)}`}><Icon name="reply" />回复</button>
           <button className="view-detail" onClick={() => onOpenNote(item.id)}>查看详情 →</button>
@@ -501,126 +556,13 @@ function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
   );
 }
 
-/** 自动模式的一行跑马灯：卡片从左进入、向右溢出，requestAnimationFrame 驱动。 */
-function MarqueeRow({ notes, speed, initialRotate, paused, profileCache, onOpenProfile, onOpenNote, onReply }: {
-  notes: NostrEvent[];
-  speed: number;
-  initialRotate: number;
-  paused: boolean;
-  profileCache: Record<string, ProfileEntry>;
-  onOpenProfile: (pubkey: string) => void;
-  onOpenNote: (eventId: string) => void;
-  onReply: (item: NostrEvent) => void;
-}) {
-  const rotateIds = (ids: string[], n: number) => {
-    if (ids.length === 0) return ids;
-    const k = ((n % ids.length) + ids.length) % ids.length;
-    return [...ids.slice(k), ...ids.slice(0, k)];
-  };
-  const [initial] = useState(() => {
-    const ids = rotateIds(
-      notes.map((note) => note.id),
-      initialRotate,
-    );
-    return { ids, map: new Map(notes.map((note) => [note.id, note] as [string, NostrEvent])) };
-  });
-  const [order, setOrder] = useState<string[]>(initial.ids);
-  const orderRef = useRef(order);
-  // Start one full card outside the left edge so the first visible motion is
-  // an actual entrance, not a card drifting away from x=0 and leaving a gap.
-  const offsetRef = useRef(-MARQUEE_STEP);
-  const seenRef = useRef<Set<string>>(new Set(orderRef.current));
-  const noteMapRef = useRef(initial.map);
-  const trackRef = useRef<HTMLDivElement>(null);
-
-  const applyOffset = (value: number) => {
-    if (trackRef.current) trackRef.current.style.transform = `translate3d(${value}px, 0, 0)`;
-  };
-
-  // Whenever membership changes (new notes, trimming, or a follow filter),
-  // rebuild from the current pool and normalize to exactly one card left of
-  // the viewport. This guarantees fresh/filtered notes never inherit a very
-  // negative offset from the long circular queue.
-  useEffect(() => {
-    const incomingIds = notes.map((note) => note.id);
-    const incomingSet = new Set(incomingIds);
-    const membershipChanged =
-      incomingIds.length !== orderRef.current.length ||
-      orderRef.current.some((id) => !incomingSet.has(id));
-
-    for (const note of notes) noteMapRef.current.set(note.id, note);
-    if (!membershipChanged) return;
-
-    const items = rotateIds(incomingIds, initialRotate);
-    const offset = -MARQUEE_STEP;
-    orderRef.current = items;
-    offsetRef.current = offset;
-    seenRef.current = new Set(items);
-    noteMapRef.current = new Map(notes.map((note) => [note.id, note] as [string, NostrEvent]));
-    applyOffset(offset);
-    setOrder(items);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notes]);
-
-  // rAF 主循环：offset 直接写 DOM，不经过 React state，避免每帧重渲染。
-  useEffect(() => {
-    if (paused) return;
-    let raf = 0;
-    let last = -1;
-    const tick = (now: number) => {
-      if (last < 0) last = now;
-      const dt = Math.min(now - last, 100);
-      last = now;
-      let offset = marqueeStepOffset(offsetRef.current, dt, speed);
-      let items = orderRef.current;
-      const viewportWidth = trackRef.current?.parentElement?.clientWidth ?? 0;
-      let guard = 0;
-      // Only recycle the tail once it is fully beyond the right edge. Moving
-      // it to the front and subtracting one step preserves every other card's
-      // exact screen position while the recycled card re-enters from the left.
-      while (
-        items.length > 1 &&
-        offset + (items.length - 1) * MARQUEE_STEP >= viewportWidth &&
-        guard++ < MARQUEE_MAX_NOTES
-      ) {
-        const recycled = marqueeRecycle(items, MARQUEE_STEP, MARQUEE_STEP);
-        items = recycled.items;
-        offset -= MARQUEE_STEP;
-      }
-      if (items !== orderRef.current) {
-        orderRef.current = items;
-        setOrder(items);
-      }
-      offsetRef.current = offset;
-      applyOffset(offset);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [paused, speed]);
-
-  return (
-    <div className="marquee-row">
-      <div className="marquee-track" ref={trackRef}>
-        {order.map((id) => {
-          const note = noteMapRef.current.get(id);
-          if (!note) return null;
-          return (
-            <article key={id} className="note marquee-card">
-              <NoteCard item={note} profileCache={profileCache} onOpenProfile={onOpenProfile} onOpenNote={onOpenNote} onReply={onReply} />
-            </article>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
 
 export function App() {
   const [relays, setRelays] = useState<RelayConfig[]>(loadRelays);
   const [relayStates, setRelayStates] = useState<Record<string, RelayState>>({});
   const [events, setEvents] = useState<NostrEvent[]>(loadCachedEvents);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [newRelay, setNewRelay] = useState("");
   const [relayError, setRelayError] = useState("");
@@ -680,12 +622,44 @@ export function App() {
   const profileEvents = profilePubkey ? events.filter((event) => event.pubkey === profilePubkey) : [];
   const feedEvents = viewMode === "manual" ? manualEvents : events;
   const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
-  // 跑马灯帖池：最新在前；行内按"最新在左"排列，新帖从左侧进入。
-  const marqueePool = useMemo(() => visibleEvents.slice(0, MARQUEE_MAX_NOTES), [visibleEvents]);
   const manualIds = useMemo(() => new Set(manualEvents.map((event) => event.id)), [manualEvents]);
   const manualPendingCount = events.reduce((count, event) => count + (manualIds.has(event.id) ? 0 : 1), 0);
-  const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen;
-  const marqueePaused = autoPaused || modalOpen || reducedMotion;
+  const modalOpen = composerOpen || detailEventId !== null || profilePubkey !== null || panelOpen || followsOpen || helpOpen;
+  const autoAdvancePaused = autoPaused || modalOpen || reducedMotion;
+
+  // 自动网格：head 为左上角卡片在 visibleEvents（时间倒序）中的下标。
+  // 每 AUTO_GRID_STEP_MS 推进一格，整张网格的内容向右下方移动一格，
+  // 无动画，直接替换。池首变化（新帖/筛选）时 head 归零，最新帖回到左上角。
+  const [autoHead, setAutoHead] = useState(0);
+  const [gridCapacity, setGridCapacity] = useState(() => autoGridCapacity(960, 700));
+  const autoGridWrapRef = useRef<HTMLDivElement | null>(null);
+  const poolLengthRef = useRef(visibleEvents.length);
+  poolLengthRef.current = visibleEvents.length;
+  const autoPoolKey = `${feedTab}::${visibleEvents[0]?.id ?? ""}`;
+  const prevAutoPoolKeyRef = useRef(autoPoolKey);
+  if (shouldResetAutoHead(prevAutoPoolKeyRef.current, autoPoolKey)) {
+    prevAutoPoolKeyRef.current = autoPoolKey;
+    setAutoHead(0);
+  }
+  useEffect(() => {
+    if (viewMode !== "auto") return;
+    const el = autoGridWrapRef.current;
+    if (!el) return;
+    const measure = () => setGridCapacity(autoGridCapacity(el.clientWidth, el.clientHeight));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [viewMode]);
+  useEffect(() => {
+    if (viewMode !== "auto" || autoAdvancePaused) return;
+    const timer = setInterval(() => {
+      setAutoHead((head) => nextAutoHead(head, poolLengthRef.current));
+    }, AUTO_GRID_STEP_MS);
+    return () => clearInterval(timer);
+  }, [viewMode, autoAdvancePaused]);
+  const autoGridItems = autoGridWindow(visibleEvents, autoHead, gridCapacity.count);
+
 
   // 浏览模式持久化；切到手动模式时冻结当前快照。
   useEffect(() => {
@@ -826,7 +800,7 @@ export function App() {
       const nextStates: Record<string, RelayState> = {};
       for (const relay of relays) nextStates[relay.url] = relay.enabled ? "connecting" : "offline";
       setRelayStates(nextStates);
-      setNetworkMessage(active.length === 0 ? "请至少启用一个中继。" : "");
+      setNetworkMessage(active.length === 0 ? "请至少启用一个资讯源。" : "");
 
       for (const relay of active) {
         const subId = `feed-${createUuid().slice(0, 8)}`;
@@ -906,7 +880,7 @@ export function App() {
     if (!currentPubkey || !window.nostr) return false;
     const liveSockets = [...socketsRef.current.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
     if (liveSockets.length === 0) {
-      setNetworkMessage("当前没有在线中继，无法发布。请检查中继面板后重试。");
+      setNetworkMessage("当前没有在线资讯源，无法发布。请检查资讯源面板后重试。");
       return false;
     }
     try {
@@ -974,7 +948,7 @@ export function App() {
         } catch {
           // Keep the in-memory follow set when storage is unavailable.
         }
-        setFollowMessage(following ? "已取消关注，关注列表已发布到中继。" : "已关注，关注列表已发布到中继。");
+        setFollowMessage(following ? "已取消关注，关注列表已发布到资讯源。" : "已关注，关注列表已发布到资讯源。");
       } catch {
         setFollowMessage("签名未完成，关注列表没有发布；本地状态已更新。");
       }
@@ -992,11 +966,11 @@ export function App() {
     event.preventDefault();
     const normalized = normalizeRelay(newRelay);
     if (!normalized) {
-      setRelayError("请输入有效的 wss:// 或 ws:// 中继地址。");
+      setRelayError("请输入有效的 wss:// 或 ws:// 资讯源地址。");
       return;
     }
     if (relays.some((relay) => relay.url === normalized)) {
-      setRelayError("这个中继已经在列表中。");
+      setRelayError("这个资讯源已经在列表中。");
       return;
     }
     setRelays((current) => [...current, { url: normalized, enabled: true }]);
@@ -1009,12 +983,14 @@ export function App() {
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
 
       <header className="utility-bar">
-        <button className="relay-summary" onClick={() => setPanelOpen(true)} aria-label="打开中继管理">
+        <button className="relay-summary" onClick={() => setPanelOpen(true)} aria-label="打开资讯源管理">
           <span className={`signal ${onlineCount > 0 ? "signal-live" : ""}`} />
-          <span>{onlineCount}/{enabledRelays.length} 中继在线</span>
+          <span>{onlineCount}/{enabledRelays.length} 资讯源在线</span>
         </button>
         <div className="utility-actions">
-          <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接中继"}><Icon name="refresh" /></button>
+          <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明"><Icon name="help" /></button>
+          <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载"><Icon name="download" /></button>
+          <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
           <button className="identity-button" onClick={() => void connectSigner()} aria-label={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}>
             <Icon name="key" />
             <span>{pubkey ? shortKey(pubkey) : "连接签名器"}</span>
@@ -1026,7 +1002,7 @@ export function App() {
         <section className="feed-intro" aria-labelledby="feed-heading">
           <div>
             <p className="section-index">PUBLIC NOTES / KIND 1</p>
-            <h1 id="feed-heading">最新帖子</h1>
+            <h1 id="feed-heading">绿野仙踪 <small className="app-version">{APP_VERSION}</small></h1>
           </div>
           <button className="compose-button desktop-compose" onClick={() => { setReplyTarget(null); setDraft(""); setComposerOpen(true); }}><Icon name="edit" />发帖子</button>
         </section>
@@ -1063,10 +1039,10 @@ export function App() {
         {visibleEvents.length === 0 ? (
           <section className="empty-state">
             <div className="empty-signal"><span /><span /><span /></div>
-            <h2>{feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上中继"}</h2>
-            <p>{feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开中继面板查看每个地址的状态，或添加一个可用中继。"}</p>
+            <h2>{feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
+            <p>{feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开资讯源面板查看每个地址的状态，或添加一个可用资讯源。"}</p>
             <button onClick={() => feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? (viewMode === "manual" ? refreshManualFeed() : setConnectionEpoch((value) => value + 1)) : setPanelOpen(true)}>
-              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理中继"}
+              {feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理资讯源"}
             </button>
           </section>
         ) : viewMode === "manual" ? (
@@ -1079,32 +1055,26 @@ export function App() {
           </ol>
         ) : (
           <section
-            className={`auto-stage${marqueePaused ? " paused" : ""}`}
-            aria-label="帖子跑马灯"
+            className={`auto-stage${autoAdvancePaused ? " paused" : ""}`}
+            aria-label="帖子自动网格"
             onMouseEnter={() => setAutoPaused(true)}
             onMouseLeave={() => setAutoPaused(false)}
           >
-            <div className="marquee-rows">
-              {Array.from({ length: MARQUEE_ROWS }, (_, row) => (
-                <MarqueeRow
-                  key={`${feedTab}-${row}`}
-                  notes={marqueePool}
-                  speed={MARQUEE_SPEEDS[row] ?? MARQUEE_SPEEDS[0] ?? 60}
-                  initialRotate={row === 0 ? 0 : Math.floor(marqueePool.length / 2)}
-                  paused={marqueePaused}
-                  profileCache={profileCache}
-                  onOpenProfile={openProfile}
-                  onOpenNote={openNote}
-                  onReply={openReply}
-                />
-              ))}
+            <div className="auto-grid-wrap" ref={autoGridWrapRef}>
+              <ol className="feed-list auto-grid">
+                {autoGridItems.map((item) => (
+                  <li className="note" key={item.id}>
+                    <NoteCard item={item} profileCache={profileCache} onOpenProfile={openProfile} onOpenNote={openNote} onReply={openReply} />
+                  </li>
+                ))}
+              </ol>
             </div>
             <div className="auto-bar">
-              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续跑马灯" : "暂停跑马灯"}>
+              <button className="auto-pause" onClick={() => setAutoPaused((paused) => !paused)} aria-label={autoPaused ? "继续自动轮播" : "暂停自动轮播"}>
                 <Icon name={autoPaused ? "play" : "pause"} />
               </button>
-              <span className="auto-count">{marqueePool.length} 条帖子</span>
-              <span className="auto-hint">悬停暂停 · 新帖从左侧进入</span>
+              <span className="auto-count">{visibleEvents.length} 条帖子</span>
+              <span className="auto-hint">悬停暂停 · 新帖进入左上角</span>
             </div>
           </section>
         )}
@@ -1114,12 +1084,12 @@ export function App() {
 
       {panelOpen && (
         <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPanelOpen(false); }}>
-          <aside className="relay-sheet" aria-label="中继管理" role="dialog" aria-modal="true">
+          <aside className="relay-sheet" aria-label="资讯源管理" role="dialog" aria-modal="true">
             <div className="sheet-heading">
-              <div><p className="section-index">RELAY POOL</p><h2>中继管理</h2></div>
-              <button className="icon-button" onClick={() => setPanelOpen(false)} aria-label="关闭中继管理"><Icon name="close" /></button>
+              <div><p className="section-index">SOURCE POOL</p><h2>资讯源管理</h2></div>
+              <button className="icon-button" onClick={() => setPanelOpen(false)} aria-label="关闭资讯源管理"><Icon name="close" /></button>
             </div>
-            <p className="sheet-copy">支持加密的 wss:// 与不加密的 ws:// 中继；修改后会自动重连。</p>
+            <p className="sheet-copy">支持加密的 wss:// 与不加密的 ws:// 资讯源；修改后会自动重连。</p>
             <ul className="relay-list">
               {relays.map((relay) => (
                 <li key={relay.url} className="relay-row">
@@ -1137,11 +1107,39 @@ export function App() {
               ))}
             </ul>
             <form className="add-relay" onSubmit={addRelay}>
-              <label htmlFor="new-relay">添加中继</label>
-              <div><input id="new-relay" value={newRelay} onChange={(event) => setNewRelay(event.target.value)} placeholder="wss:// 或 ws://" inputMode="url" autoCapitalize="none" autoCorrect="off" /><button type="submit" aria-label="添加中继"><Icon name="plus" /></button></div>
-              <p className="field-hint">在 HTTPS 页面中，浏览器可能会拦截不加密的 ws:// 连接；客户端仍会保留该中继并显示实际连接状态。</p>
+              <label htmlFor="new-relay">添加资讯源</label>
+              <div><input id="new-relay" value={newRelay} onChange={(event) => setNewRelay(event.target.value)} placeholder="wss:// 或 ws://" inputMode="url" autoCapitalize="none" autoCorrect="off" /><button type="submit" aria-label="添加资讯源"><Icon name="plus" /></button></div>
+              <p className="field-hint">在 HTTPS 页面中，浏览器可能会拦截不加密的 ws:// 连接；客户端仍会保留该资讯源并显示实际连接状态。</p>
               {relayError && <p className="field-error">{relayError}</p>}
             </form>
+          </aside>
+        </div>
+      )}
+
+      {helpOpen && (
+        <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
+          <aside className="relay-sheet" aria-label="使用说明" role="dialog" aria-modal="true">
+            <div className="sheet-heading">
+              <div><p className="section-index">GUIDE</p><h2>使用说明</h2></div>
+              <button className="icon-button" onClick={() => setHelpOpen(false)} aria-label="关闭使用说明"><Icon name="close" /></button>
+            </div>
+            <div className="help-body">
+              <p>绿野仙踪是一个极简的 Nostr 帖子浏览器，从多个资讯源拉取公开帖子，去重后展示。你的私钥永远不会经过页面。</p>
+              <h3>自动模式</h3>
+              <p>帖子以网格自动轮播：每 8 秒整体向右下方推进一格，新帖子会出现在第一排第一列。把鼠标悬停在帖子区、或点暂停按钮可以停住；打开弹窗时也会自动暂停。</p>
+              <h3>手动模式</h3>
+              <p>自由滚动浏览全部帖子，点「刷新」获取新帖子。浏览模式的选择会自动记住。</p>
+              <h3>资讯源</h3>
+              <p>点左上角的在线状态打开资讯源管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。</p>
+              <h3>发帖与回复</h3>
+              <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
+              <h3>关注</h3>
+              <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。</p>
+              <h3>版本更新</h3>
+              <p>点标题栏的下载图标会清空本地缓存并重新下载最新版，页面会自动重载。</p>
+              <h3>离线使用</h3>
+              <p>页面加载一次后会被完整缓存，断网或关闭浏览器后重新打开也能继续使用。</p>
+            </div>
           </aside>
         </div>
       )}
@@ -1188,7 +1186,7 @@ export function App() {
             <div className="detail-content"><FormattedNote content={detailEvent.content} /></div>
             <dl className="event-facts">
               <div><dt>发布时间</dt><dd>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(detailEvent.created_at * 1000))}</dd></div>
-              <div><dt>来源中继</dt><dd>{detailEvent.relays.join("、")}</dd></div>
+              <div><dt>来源资讯源</dt><dd>{detailEvent.relays.join("、")}</dd></div>
               <div><dt>事件 ID</dt><dd><code>{encodeNip19("note", detailEvent.id)}</code><button onClick={() => void copyValue(encodeNip19("note", detailEvent.id), "事件 ID")}>复制</button></dd></div>
               <div><dt>作者公钥</dt><dd><code>{encodeNip19("npub", detailEvent.pubkey)}</code><button onClick={() => void copyValue(encodeNip19("npub", detailEvent.pubkey), "作者公钥")}>复制</button></dd></div>
             </dl>
@@ -1245,7 +1243,7 @@ export function App() {
               <div><p className="section-index">FOLLOWING</p><h2 id="follows-title">关注列表</h2></div>
               <button className="icon-button" onClick={() => setFollowsOpen(false)} aria-label="关闭关注列表"><Icon name="close" /></button>
             </div>
-            <p className="sheet-copy">{pubkey ? "修改会经签名器签名，发布 kind-3 关注列表到中继。" : "未连接签名器，关注仅保存在本浏览器。"}</p>
+            <p className="sheet-copy">{pubkey ? "修改会经签名器签名，发布 kind-3 关注列表到资讯源。" : "未连接签名器，关注仅保存在本浏览器。"}</p>
             {followMessage && <p className="copy-status" role="status">{followMessage}</p>}
             {follows.length === 0 ? (
               <p className="muted">还没有关注任何人。在帖子或作者页点「关注」即可添加。</p>

@@ -56,7 +56,7 @@ describe("normalizeRelay", () => {
 });
 
 describe("loadRelays", () => {
-  test("无存储时返回默认 4 个中继，lulin.org 首位", () => {
+  test("无存储时返回默认 4 个资讯源，lulin.org 首位", () => {
     const relays = loadRelays();
     expect(relays).toHaveLength(4);
     expect(relays[0]?.url).toBe("ws://lulin.org");

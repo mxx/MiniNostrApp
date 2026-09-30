@@ -7,8 +7,19 @@
 
 import { buildClient } from "@hatch/space-sdk/build";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 await buildClient();
+
+// 标题栏版本号：由 `git describe` 生成，注入产物 JS 的 __APP_VERSION__ 占位符。
+// 必须在 standalone-sw 之前执行，sw.js 的 precache 清单只关心文件名，不受内容替换影响。
+{
+  const { getAppVersion, injectAppVersion } = await import("./scripts/app-version.mjs");
+  const clientDir = fileURLToPath(new URL("./", import.meta.url));
+  const version = getAppVersion(clientDir);
+  const changed = injectAppVersion(join(clientDir, "dist", "assets"), version);
+  for (const name of changed) console.log(`app version ${version} injected into ${name}`);
+}
 
 // Standalone static deployments (e.g. lulin.org/client/) opt in to the
 // service worker + site icons. Muse's artifact packager accepts exactly one
