@@ -452,10 +452,6 @@ function Icon({ name }: { name: "relay" | "refresh" | "edit" | "key" | "close" |
   return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>;
 }
 
-function AvatarImg({ picture, label, large }: { picture: string; label: string; large?: boolean }) {
-  return <img className={`avatar-img${large ? " large-avatar-img" : ""}`} src={picture} alt={label} loading="lazy" />;
-}
-
 /** Renders note content clamped to the card; shows an expand hint only when text actually overflows. */
 function ClampedNote({ content }: { content: string }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -482,12 +478,11 @@ function NoteCard({ item, profileCache, onOpenProfile, onOpenNote, onReply }: {
   onOpenNote: (eventId: string) => void;
   onReply: (item: NostrEvent) => void;
 }) {
-  const picture = profilePicture(item.pubkey, profileCache);
   return (
     <>
       <div className="note-meta">
         <button className="avatar-mark" onClick={() => onOpenProfile(item.pubkey)} aria-label={`查看作者 ${profileName(item.pubkey, profileCache)}`}>
-          {picture ? <AvatarImg picture={picture} label="" /> : item.pubkey.slice(0, 2).toUpperCase()}
+          {item.pubkey.slice(0, 2).toUpperCase()}
         </button>
         <button className="author" onClick={() => onOpenProfile(item.pubkey)} title={item.pubkey}>{profileName(item.pubkey, profileCache)}</button>
         <time dateTime={new Date(item.created_at * 1000).toISOString()}>{relativeTime(item.created_at)}</time>
@@ -531,7 +526,9 @@ function MarqueeRow({ notes, speed, initialRotate, paused, profileCache, onOpenP
   });
   const [order, setOrder] = useState<string[]>(initial.ids);
   const orderRef = useRef(order);
-  const offsetRef = useRef(0);
+  // Start one full card outside the left edge so the first visible motion is
+  // an actual entrance, not a card drifting away from x=0 and leaving a gap.
+  const offsetRef = useRef(-MARQUEE_STEP);
   const seenRef = useRef<Set<string>>(new Set(orderRef.current));
   const noteMapRef = useRef(initial.map);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -540,36 +537,26 @@ function MarqueeRow({ notes, speed, initialRotate, paused, profileCache, onOpenP
     if (trackRef.current) trackRef.current.style.transform = `translate3d(${value}px, 0, 0)`;
   };
 
-  // 新帖到达：把没见过的 id 前置到队首（从左侧进入），offset 左移补偿；
-  // 单次大量到达则按新帖池重建，避免 offset 漂出太远长时间空白。
+  // Whenever membership changes (new notes, trimming, or a follow filter),
+  // rebuild from the current pool and normalize to exactly one card left of
+  // the viewport. This guarantees fresh/filtered notes never inherit a very
+  // negative offset from the long circular queue.
   useEffect(() => {
-    for (const note of notes) {
-      if (!noteMapRef.current.has(note.id)) noteMapRef.current.set(note.id, note);
-    }
-    const fresh = notes.map((note) => note.id).filter((id) => !seenRef.current.has(id));
-    let items = orderRef.current;
-    let offset = offsetRef.current;
-    if (fresh.length > MARQUEE_RESET_THRESHOLD) {
-      items = rotateIds(
-        notes.map((note) => note.id),
-        initialRotate,
-      );
-      offset = 0;
-      seenRef.current = new Set(items);
-      noteMapRef.current = new Map(notes.map((note) => [note.id, note] as [string, NostrEvent]));
-    } else if (fresh.length > 0) {
-      fresh.forEach((id) => seenRef.current.add(id));
-      const prepended = marqueePrepend(items, offset, fresh, MARQUEE_STEP);
-      items = prepended.items;
-      offset = prepended.offset;
-    }
-    if (items.length > MARQUEE_MAX_NOTES) {
-      const dropped = items.slice(MARQUEE_MAX_NOTES);
-      items = items.slice(0, MARQUEE_MAX_NOTES);
-      dropped.forEach((id) => noteMapRef.current.delete(id));
-    }
+    const incomingIds = notes.map((note) => note.id);
+    const incomingSet = new Set(incomingIds);
+    const membershipChanged =
+      incomingIds.length !== orderRef.current.length ||
+      orderRef.current.some((id) => !incomingSet.has(id));
+
+    for (const note of notes) noteMapRef.current.set(note.id, note);
+    if (!membershipChanged) return;
+
+    const items = rotateIds(incomingIds, initialRotate);
+    const offset = -MARQUEE_STEP;
     orderRef.current = items;
     offsetRef.current = offset;
+    seenRef.current = new Set(items);
+    noteMapRef.current = new Map(notes.map((note) => [note.id, note] as [string, NostrEvent]));
     applyOffset(offset);
     setOrder(items);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -586,11 +573,19 @@ function MarqueeRow({ notes, speed, initialRotate, paused, profileCache, onOpenP
       last = now;
       let offset = marqueeStepOffset(offsetRef.current, dt, speed);
       let items = orderRef.current;
+      const viewportWidth = trackRef.current?.parentElement?.clientWidth ?? 0;
       let guard = 0;
-      while (offset >= MARQUEE_STEP && items.length > 1 && guard++ < 8) {
-        const recycled = marqueeRecycle(items, offset, MARQUEE_STEP);
+      // Only recycle the tail once it is fully beyond the right edge. Moving
+      // it to the front and subtracting one step preserves every other card's
+      // exact screen position while the recycled card re-enters from the left.
+      while (
+        items.length > 1 &&
+        offset + (items.length - 1) * MARQUEE_STEP >= viewportWidth &&
+        guard++ < MARQUEE_MAX_NOTES
+      ) {
+        const recycled = marqueeRecycle(items, MARQUEE_STEP, MARQUEE_STEP);
         items = recycled.items;
-        offset = recycled.offset;
+        offset -= MARQUEE_STEP;
       }
       if (items !== orderRef.current) {
         orderRef.current = items;
@@ -707,6 +702,7 @@ export function App() {
   }
   const profileEntry = profilePubkey ? profileCache[profilePubkey] : undefined;
   const profileDetail = profileEntry?.profile;
+  const externalProfilePicture = profileDetail?.picture && /^https?:\/\//i.test(profileDetail.picture) ? profileDetail.picture : null;
   const isFollowing = profilePubkey ? follows.includes(profilePubkey) : false;
 
   function openNote(eventId: string) {
@@ -1212,14 +1208,11 @@ export function App() {
               <button className="icon-button" onClick={() => setProfilePubkey(null)} aria-label="关闭作者详情"><Icon name="close" /></button>
             </div>
             <div className="profile-identity">
-              {profileDetail?.picture ? (
-                <AvatarImg picture={profileDetail.picture} label={profileName(profilePubkey, profileCache)} large />
-              ) : (
-                <span className="avatar-mark large-avatar">{profilePubkey.slice(0, 2).toUpperCase()}</span>
-              )}
+              <span className="avatar-mark large-avatar">{profilePubkey.slice(0, 2).toUpperCase()}</span>
               <div className="profile-names">
                 <strong>{profileName(profilePubkey, profileCache)}</strong>
                 {profileDetail?.nip05 && <small className="profile-nip05">{profileDetail.nip05}</small>}
+                {externalProfilePicture && <a className="profile-picture-link" href={externalProfilePicture} target="_blank" rel="noreferrer">查看外部头像</a>}
               </div>
               {profileDetail?.about && <p className="profile-about">{profileDetail.about}</p>}
               <code>{encodeNip19("npub", profilePubkey)}</code>
@@ -1258,29 +1251,22 @@ export function App() {
               <p className="muted">还没有关注任何人。在帖子或作者页点「关注」即可添加。</p>
             ) : (
               <ul className="follow-list">
-                {follows.map((followed) => {
-                  const picture = profilePicture(followed, profileCache);
-                  return (
-                    <li key={followed} className="follow-row">
-                      <button
-                        className="follow-identity"
-                        onClick={() => { setFollowsOpen(false); openProfile(followed); }}
-                        aria-label={`查看 ${profileName(followed, profileCache)}`}
-                      >
-                        {picture ? (
-                          <AvatarImg picture={picture} label="" />
-                        ) : (
-                          <span className="avatar-mark">{followed.slice(0, 2).toUpperCase()}</span>
-                        )}
-                        <span className="follow-names">
-                          <strong>{profileName(followed, profileCache)}</strong>
-                          <small>{shortKey(encodeNip19("npub", followed))}</small>
-                        </span>
-                      </button>
-                      <button className="unfollow-button" onClick={() => void toggleFollow(followed)}>取消关注</button>
-                    </li>
-                  );
-                })}
+                {follows.map((followed) => (
+                  <li key={followed} className="follow-row">
+                    <button
+                      className="follow-identity"
+                      onClick={() => { setFollowsOpen(false); openProfile(followed); }}
+                      aria-label={`查看 ${profileName(followed, profileCache)}`}
+                    >
+                      <span className="avatar-mark">{followed.slice(0, 2).toUpperCase()}</span>
+                      <span className="follow-names">
+                        <strong>{profileName(followed, profileCache)}</strong>
+                        <small>{shortKey(encodeNip19("npub", followed))}</small>
+                      </span>
+                    </button>
+                    <button className="unfollow-button" onClick={() => void toggleFollow(followed)}>取消关注</button>
+                  </li>
+                ))}
               </ul>
             )}
           </section>

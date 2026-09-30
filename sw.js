@@ -11,7 +11,7 @@
 // caches from older versions.
 
 // x-release-please: bump on release
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v4";
 const CACHE_NAME = `mininostr-app-${CACHE_VERSION}`;
 // build.mjs replaces this marker with every emitted app file. Keeping the
 // fallback makes the source worker usable during local, unbundled previews.
