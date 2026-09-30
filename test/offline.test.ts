@@ -34,7 +34,7 @@ describe("sw.js", () => {
     expect(sw).toContain("caches.delete");
   });
 
-  test("预缓存 app shell（./ 与 ./index.html）", () => {
+  test("预缓存 app shell（源码保留开发环境 fallback）", () => {
     const sw = read("sw.js");
     expect(sw).toContain('"./"');
     expect(sw).toContain('"./index.html"');
@@ -74,10 +74,11 @@ describe("入口与构建", () => {
     expect(main).toContain('register("./sw.js")');
   });
 
-  test("build.mjs 把 sw.js 拷贝到 dist/（静态托管可取到）", () => {
+  test("build.mjs 把 standalone 构建委托给 scripts/standalone-sw.mjs", () => {
     const build = read("build.mjs");
-    expect(build).toContain("sw.js");
-    expect(build).toContain("dist");
+    expect(build).toContain('MININOSTR_STANDALONE === "1"');
+    expect(build).toContain("standalone-sw.mjs");
+    expect(build).toContain("buildStandaloneSw");
   });
 });
 

@@ -10,9 +10,18 @@ import { fileURLToPath } from "node:url";
 
 await buildClient();
 
-// Ship the service worker next to the bundle: the SDK only emits bundled
-// output, so copy the app-scope sw.js into dist/ for static hosts.
-// (Runs only in the real pipeline — hand builds exit inside buildClient.)
-const distDir = fileURLToPath(new URL("./dist/", import.meta.url));
-const swSource = fileURLToPath(new URL("./sw.js", import.meta.url));
-await Bun.write(`${distDir}sw.js`, Bun.file(swSource));
+// Standalone static deployments (e.g. lulin.org/client/) opt in to the
+// service worker + site icons. Muse's artifact packager accepts exactly one
+// JavaScript entry, so the artifact relies on the host shell's offline asset
+// cache while still using the same localStorage data persistence. The
+// static build sets MININOSTR_STANDALONE=1 and receives a root-scoped sw.js
+// (with every emitted file precached) plus favicon.ico / apple-touch-icon.png
+// beside index.html. The same step runs by hand via
+// scripts/standalone-sw.mjs before uploading to a plain static host.
+if (process.env.MININOSTR_STANDALONE === "1") {
+  const { buildStandaloneSw } = await import("./scripts/standalone-sw.mjs");
+  await buildStandaloneSw(
+    fileURLToPath(new URL("./", import.meta.url)),
+    fileURLToPath(new URL("./dist/", import.meta.url)),
+  );
+}
