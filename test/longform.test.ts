@@ -187,6 +187,21 @@ describe("renderMarkdownHtml", () => {
     expect(html).toContain("<p>");
     expect(html).not.toContain("<table>");
   });
+
+  test("CRLF 换行不会死循环（真实长文曾因此卡死浏览器）", () => {
+    const html = renderMarkdownHtml("# 标题\r\n\r\n段落 **粗体**\r\n\r\n- 列表\r\n> 引用\r\n", true);
+    expect(html).toContain("<h1>标题</h1>");
+    expect(html).toContain("<strong>粗体</strong>");
+    expect(html).toContain("<ul><li>列表</li></ul>");
+    expect(html).toContain("<blockquote>引用</blockquote>");
+    expect(html).not.toContain("\r");
+  });
+
+  test("单独 CR 换行同样处理", () => {
+    const html = renderMarkdownHtml("# 标题\r段落\r", true);
+    expect(html).toContain("<h1>标题</h1>");
+    expect(html).toContain("<p>段落</p>");
+  });
 });
 
 describe("长文缓存", () => {

@@ -510,7 +510,9 @@ function isLongformBlockStart(line: string): boolean {
  * 表格等复杂语法暂不支持，会按段落原文显示。
  */
 export function renderMarkdownHtml(source: string, allowImages: boolean): string {
-  const lines = escapeHtml(source).split("\n");
+  // 统一换行：CRLF 的 \r 会残留在行尾，而 JS 的 . 不匹配 \r，
+  // 会导致带 $ 锚点的块正则失效、行循环无法推进。先全部转成 \n。
+  const lines = escapeHtml(source).replace(/\r\n?/g, "\n").split("\n");
   const blocks: string[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -575,7 +577,12 @@ export function renderMarkdownHtml(source: string, allowImages: boolean): string
       paragraph.push(lines[i] ?? "");
       i++;
     }
-    if (paragraph.length > 0) blocks.push(`<p>${renderLongformInline(paragraph.join("<br>"), allowImages)}</p>`);
+    if (paragraph.length > 0) {
+      blocks.push(`<p>${renderLongformInline(paragraph.join("<br>"), allowImages)}</p>`);
+    } else {
+      // 兜底：任何行都必须推进，避免未知输入造成死循环。
+      i++;
+    }
   }
   return blocks.join("\n");
 }
