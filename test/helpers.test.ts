@@ -177,9 +177,17 @@ describe("资讯源错误原因接线", () => {
   });
 });
 
-describe("长文详情宽度", () => {
-  test("详情至少不小于列表卡片宽度（1120px feed 列宽 − 48px padding）", () => {
-    const css = readFileSync(join(ROOT, "src/theme.css"), "utf-8");
-    expect(css).toContain(".detail-sheet.longform-sheet { width: min(100%, max(33.333vw, calc(1120px - 48px))); }");
+describe("长文详情尺寸", () => {
+  const css = () => readFileSync(join(ROOT, "src/theme.css"), "utf-8");
+  const longformBlock = () => css().match(/\.detail-sheet\.longform-sheet \{[^}]*\}/)?.[0] ?? "";
+
+  test("宽度至少不小于列表卡片（1120px feed 列宽 − 48px padding）", () => {
+    expect(longformBlock()).toContain("width: min(100%, max(33.333vw, calc(1120px - 48px)));");
+  });
+  test("高度与列表区同高：顶满可视区，不再按 820px 截断", () => {
+    const block = longformBlock();
+    expect(block).toContain("height: calc(100dvh - 48px);");
+    expect(block).toContain("max-height: calc(100dvh - 48px);");
+    expect(block).not.toContain("820px");
   });
 });

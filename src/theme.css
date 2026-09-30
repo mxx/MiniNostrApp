@@ -327,8 +327,13 @@ h2 { font-size: 24px; line-height: 1.08; }
   .composer-backdrop, .detail-backdrop { align-items: center; justify-content: center; padding: 24px; }
   .composer-sheet { width: min(560px, 100%); border-radius: 18px; padding: 26px; }
   .detail-sheet { width: min(620px, 100%); max-height: min(820px, calc(100vh - 48px)); border-radius: 18px; padding: 26px; }
-  /* 长文详情至少不小于列表卡片宽度：1120px 是 .feed-column 最大宽度，48px 是其左右 padding。 */
-  .detail-sheet.longform-sheet { width: min(100%, max(33.333vw, calc(1120px - 48px))); }
+  /* 长文详情：宽度至少不小于列表卡片（1120px 是 .feed-column 最大宽度，48px 是其左右 padding）；
+     高度与列表区同高——顶满可视区（backdrop 上下各 24px padding），不再按 820px 截断，超长正文在框内滚动。 */
+  .detail-sheet.longform-sheet {
+    width: min(100%, max(33.333vw, calc(1120px - 48px)));
+    height: calc(100dvh - 48px);
+    max-height: calc(100dvh - 48px);
+  }
 }
 
 
