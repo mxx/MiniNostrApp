@@ -60,7 +60,7 @@ type ContactList = {
 };
 
 const DEFAULT_RELAYS: RelayConfig[] = [
-  { url: "ws://lulin.org", enabled: true },
+  { url: "wss://lulin.org", enabled: true },
   { url: "wss://relay.gulugulu.moe", enabled: true },
   { url: "wss://relay.nostr.wirednet.jp", enabled: true },
   { url: "wss://relay-jp.nostr.wirednet.jp", enabled: true },
@@ -262,10 +262,11 @@ export function loadRelays(): RelayConfig[] {
     );
     if (valid.length === 0) return DEFAULT_RELAYS;
 
-    // Carry the new community relay into existing installations without
-    // resetting any relay choices the viewer has already saved.
-    if (!valid.some((relay) => relay.url === "ws://lulin.org")) {
-      return [{ url: "ws://lulin.org", enabled: true }, ...valid];
+    // Carry the community relay into existing installations without
+    // resetting any relay choices the viewer has already saved. The old
+    // ws://lulin.org entry is respected as-is — no forced migration.
+    if (!valid.some((relay) => relay.url === "wss://lulin.org" || relay.url === "ws://lulin.org")) {
+      return [{ url: "wss://lulin.org", enabled: true }, ...valid];
     }
     return valid;
   } catch {

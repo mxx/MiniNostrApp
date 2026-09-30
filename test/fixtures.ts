@@ -64,7 +64,7 @@ export function makeKind3Event(pubkey: string, follows: string[]): SampleEvent {
 }
 
 export const SAMPLE_RELAYS = [
-  { url: "ws://lulin.org", enabled: true },
+  { url: "wss://lulin.org", enabled: true },
   { url: "wss://relay.gulugulu.moe", enabled: true },
   { url: "wss://relay-jp.nostr.wirednet.jp", enabled: false },
 ];

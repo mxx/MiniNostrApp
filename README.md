@@ -10,7 +10,7 @@
 - 发帖（NIP-07 浏览器签名，私钥不经过页面）
 - 资讯源面板：运行时添加/删除/开关，在线状态显示
 - 支持 `ws://` 和 `wss://`（HTTP 页面下无 mixed content 限制）
-- 默认资讯源：`ws://lulin.org`、`wss://relay.gulugulu.moe`、`wss://relay-jp.nostr.wirednet.jp`、`wss://relay.nostr.wirednet.jp`
+- 默认资讯源：`wss://lulin.org`、`wss://relay.gulugulu.moe`、`wss://relay-jp.nostr.wirednet.jp`、`wss://relay.nostr.wirednet.jp`
 - 等尺寸卡片网格：帖子按统一大小 box 排列，长内容自动折叠并提示，点击展开全文
 - 浏览模式：**自动**（默认）固定网格——无页面滚动、无切换动画，新帖进入左上角，其余内容按从左到右、从上到下顺移；**手动**——等尺寸网格，滚动浏览，右上角按钮手动刷新
 - 回复：卡片与详情页的「回复」按钮，按 NIP-10 生成 `e`（带资讯源提示 + reply 标记）/`p` 标签，经 NIP-07 签名发布

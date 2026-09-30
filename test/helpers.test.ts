@@ -56,10 +56,10 @@ describe("normalizeRelay", () => {
 });
 
 describe("loadRelays", () => {
-  test("无存储时返回默认 4 个资讯源，lulin.org 首位", () => {
+  test("无存储时返回默认 4 个资讯源，lulin.org 首位（wss）", () => {
     const relays = loadRelays();
     expect(relays).toHaveLength(4);
-    expect(relays[0]?.url).toBe("ws://lulin.org");
+    expect(relays[0]?.url).toBe("wss://lulin.org");
     expect(relays.every((r) => typeof r.enabled === "boolean")).toBe(true);
   });
   test("旧存档缺 lulin.org 时自动补入队首，不重置用户选择", () => {
@@ -69,14 +69,21 @@ describe("loadRelays", () => {
     ];
     localStorage.setItem("nostr-min-relays-v1", JSON.stringify(stored));
     const relays = loadRelays();
-    expect(relays[0]?.url).toBe("ws://lulin.org");
+    expect(relays[0]?.url).toBe("wss://lulin.org");
     expect(relays).toHaveLength(3);
     expect(relays.find((r) => r.url === "wss://relay-jp.nostr.wirednet.jp")?.enabled).toBe(false);
   });
-  test("已有 lulin.org 的存档原样返回", () => {
-    const stored = [{ url: "ws://lulin.org", enabled: false }];
+  test("已有 lulin.org 的存档原样返回，不重复注入", () => {
+    const stored = [{ url: "wss://lulin.org", enabled: false }];
     localStorage.setItem("nostr-min-relays-v1", JSON.stringify(stored));
     expect(loadRelays()).toEqual(stored);
+  });
+  test("旧 ws://lulin.org 存档保留，不强制迁移、不重复", () => {
+    const stored = [{ url: "ws://lulin.org", enabled: false }];
+    localStorage.setItem("nostr-min-relays-v1", JSON.stringify(stored));
+    const relays = loadRelays();
+    expect(relays).toEqual(stored);
+    expect(relays.filter((r) => r.url.includes("lulin.org"))).toHaveLength(1);
   });
   test("损坏的 JSON 回退默认", () => {
     localStorage.setItem("nostr-min-relays-v1", "{broken");
