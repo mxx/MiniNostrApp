@@ -14,6 +14,22 @@
 - 等尺寸卡片网格：帖子按统一大小 box 排列，长内容自动折叠并提示，点击展开全文
 - 用户 profile：拉取 kind-0 资料（名字/头像/简介），按 profile 显示作者
 - 关注：kind-3 联系人列表读取与编辑（需 NIP-07 签名器），未连接时本地保存
+- 离线可用：Service Worker 缓存 app shell，帖子 feed 持久化到 localStorage，断网/重启浏览器后无需重新下载即可打开
+
+## 离线机制
+
+- `sw.js`：安装时预缓存 `./` 与 `./index.html`；同源 GET 请求 cache-first（带 hash 的 bundle 文件名无需写死，运行时缓存）；navigation 离线时回退到缓存的 index.html；绝不拦截跨域 relay 流量。每次发布若 bundle 变化，记得 bump `sw.js` 里的 `CACHE_VERSION`。
+- 帖子 feed：`loadCachedEvents` / `saveCachedEvents`（`src/App.tsx`），上限 `MAX_EVENTS` 条，节流写入 + `pagehide` 兜底；损坏数据自动丢弃。
+- 纯 HTTP 站点（如 `http://lulin.org`）不是 secure context，浏览器会禁用 Service Worker；此时靠 HTTP 磁盘缓存 + 持久化数据实现"重启免下载"。建议 nginx 配置：
+
+```nginx
+location /client/ {
+    # sw.js 与 index.html：每次都向源站确认，保证更新及时下发
+    location ~ ^/client/(sw\.js|index\.html)$ { add_header Cache-Control "no-cache"; }
+    # 带 hash 的 bundle 资源：永久缓存
+    location ~ ^/client/assets/ { add_header Cache-Control "public, max-age=31536000, immutable"; }
+}
+```
 
 ## 本地运行
 

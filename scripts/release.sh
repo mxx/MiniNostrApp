@@ -54,9 +54,10 @@ ssh-add ~/.bridge/ssh-tunnel
 export GIT_SSH_COMMAND="ssh -o ProxyCommand='ssh -A -p 2223 -i ~/.bridge/ssh-tunnel -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 mi@127.0.0.1 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -W %h:%p mi@ff.fudu.space' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25"
 
 git fetch origin || fail "git fetch 失败"
-LOCAL="$(git rev-parse HEAD)"
-UPSTREAM="$(git rev-parse origin/main)"
-[ "$LOCAL" = "$UPSTREAM" ] || fail "本地与 origin/main 不一致（$LOCAL vs $UPSTREAM），先 rebase 再发布"
+# 允许推送当且仅当 origin/main 是本地 HEAD 的祖先（即本地领先或一致）；
+# 若已分叉（diverged），必须先 rebase。
+git merge-base --is-ancestor "origin/main" HEAD \
+  || fail "本地与 origin/main 已分叉，先 rebase 再发布"
 
 git push origin main || fail "git push 失败"
 log "发布成功"

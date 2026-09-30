@@ -70,8 +70,48 @@ const RELAY_STORAGE_KEY = "nostr-min-relays-v1";
 const PROFILE_STORAGE_KEY = "nostr-min-profiles-v1";
 const FOLLOWS_STORAGE_KEY = "nostr-min-follows-v1";
 const LOCAL_FOLLOWS_STORAGE_KEY = "nostr-min-follows-local-v1";
+const EVENTS_STORAGE_KEY = "nostr-min-events-v1";
 const PROFILE_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_EVENTS = 120;
+export const MAX_EVENTS = 120;
+
+// Persisted feed: after the first successful load the latest notes survive
+// browser restarts and render instantly (even offline) before relays
+// reconnect. Live events merge over the cached ones by id.
+export function loadCachedEvents(): NostrEvent[] {
+  try {
+    const raw = localStorage.getItem(EVENTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (entry): entry is NostrEvent =>
+          !!entry &&
+          typeof entry === "object" &&
+          (entry as { kind?: unknown }).kind === 1 &&
+          typeof (entry as { id?: unknown }).id === "string" &&
+          typeof (entry as { pubkey?: unknown }).pubkey === "string" &&
+          typeof (entry as { content?: unknown }).content === "string" &&
+          typeof (entry as { created_at?: unknown }).created_at === "number",
+      )
+      .map((entry) => ({
+        ...entry,
+        tags: Array.isArray(entry.tags) ? entry.tags : [],
+        relays: Array.isArray(entry.relays) ? entry.relays : [],
+      }))
+      .slice(0, MAX_EVENTS);
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedEvents(events: NostrEvent[]): void {
+  try {
+    localStorage.setItem(EVENTS_STORAGE_KEY, JSON.stringify(events.slice(0, MAX_EVENTS)));
+  } catch {
+    // quota exceeded or private mode — the live feed still works
+  }
+}
 
 function createUuid(): string {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -364,7 +404,7 @@ function ClampedNote({ content }: { content: string }) {
 export function App() {
   const [relays, setRelays] = useState<RelayConfig[]>(loadRelays);
   const [relayStates, setRelayStates] = useState<Record<string, RelayState>>({});
-  const [events, setEvents] = useState<NostrEvent[]>([]);
+  const [events, setEvents] = useState<NostrEvent[]>(loadCachedEvents);
   const [panelOpen, setPanelOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [newRelay, setNewRelay] = useState("");
@@ -389,6 +429,25 @@ export function App() {
   const profileRequestedRef = useRef<Set<string>>(new Set());
   const contactSubRef = useRef<string | null>(null);
   const contactBaseRef = useRef<ContactList | null>(null);
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
+  const lastPersistRef = useRef(0);
+
+  // Persist the feed (throttled): bursts of incoming notes would otherwise
+  // stringify on every event; pagehide flushes the latest state so nothing
+  // is lost when the browser closes.
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastPersistRef.current < 3000) return;
+    lastPersistRef.current = now;
+    saveCachedEvents(events);
+  }, [events]);
+
+  useEffect(() => {
+    const flush = () => saveCachedEvents(eventsRef.current);
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
 
   const enabledRelays = useMemo(() => relays.filter((relay) => relay.enabled), [relays]);
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;

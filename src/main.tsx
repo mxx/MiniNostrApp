@@ -10,6 +10,19 @@ if (!rootEl) {
   throw new Error("missing generated space root element");
 }
 
+// Offline support: the service worker (sw.js) caches the app shell on first
+// load, so reopening the browser — or losing the network — needs no
+// re-download. Registration is a no-op where service workers are unavailable
+// (e.g. plain-http hosts); the HTTP disk cache + persisted feed still give
+// instant reloads there.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {
+      // offline caching unavailable; the app still works online
+    });
+  });
+}
+
 // If you edit this file: keep `<QueryClientProvider client={spaceQueryClient}>`
 // wrapping the app (every space shares the SDK's QueryClient), and keep
 // BOTH the `hatch-space-root` class AND the `data-hatch-space-root`
