@@ -1681,9 +1681,9 @@ export function App() {
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
 
       <header className="utility-bar">
-        <button className="relay-summary" onClick={() => setPanelOpen(true)} aria-label="打开资讯源管理">
+        <button className="relay-summary" onClick={() => setPanelOpen(true)} aria-label="打开资讯中继管理" title="打开资讯中继管理">
           <span className={`signal ${onlineCount > 0 ? "signal-live" : ""}`} />
-          <span>{onlineCount}/{enabledRelays.length} 资讯源在线</span>
+          <span>{onlineCount}/{enabledRelays.length} 中继在线</span>
         </button>
         <div className="utility-actions">
           <button
@@ -1703,10 +1703,10 @@ export function App() {
           >
             <Icon name="filter" />
           </button>
-          <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明"><Icon name="help" /></button>
-          <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载"><Icon name="download" /></button>
-          <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
-          <button className="identity-button" onClick={() => void connectSigner()} aria-label={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}>
+          <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明" title="使用说明"><Icon name="help" /></button>
+          <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载" title="版本更新，重新下载"><Icon name="download" /></button>
+          <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"} title={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
+          <button className="identity-button" onClick={() => void connectSigner()} aria-label={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"} title={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}>
             <Icon name="key" />
             <span>{pubkey ? shortKey(pubkey) : "连接签名器"}</span>
           </button>
@@ -1816,10 +1816,10 @@ export function App() {
 
       {panelOpen && (
         <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPanelOpen(false); }}>
-          <aside className="relay-sheet" aria-label="资讯源管理" role="dialog" aria-modal="true">
+          <aside className="relay-sheet" aria-label="资讯中继管理" role="dialog" aria-modal="true">
             <div className="sheet-heading">
-              <div><p className="section-index">SOURCE POOL</p><h2>资讯源管理</h2></div>
-              <button className="icon-button" onClick={() => setPanelOpen(false)} aria-label="关闭资讯源管理"><Icon name="close" /></button>
+              <div><p className="section-index">SOURCE POOL</p><h2>资讯中继管理</h2></div>
+              <button className="icon-button" onClick={() => setPanelOpen(false)} aria-label="关闭资讯中继管理"><Icon name="close" /></button>
             </div>
             <p className="sheet-copy">支持加密的 wss:// 与不加密的 ws:// 资讯源；修改后会自动重连。</p>
             <ul className="relay-list">
@@ -1865,7 +1865,7 @@ export function App() {
               <h3>手动模式</h3>
               <p>自由滚动浏览全部帖子，点「刷新」获取新帖子。浏览模式的选择会自动记住。</p>
               <h3>资讯源</h3>
-              <p>点左上角的在线状态打开资讯源管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。连接失败时会在该资讯源下方显示原因（如被浏览器拦截、超时等）。</p>
+              <p>点左上角的在线状态打开资讯中继管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。连接失败时会在该资讯源下方显示原因（如被浏览器拦截、超时等）。</p>
               <h3>发帖与回复</h3>
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
               <h3>关注</h3>

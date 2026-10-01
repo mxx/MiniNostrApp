@@ -492,17 +492,6 @@ describe("帮助弹窗", () => {
   });
 });
 
-describe("文案：资讯源", () => {
-  test("界面源码不再出现“中继”字样", () => {
-    expect(appSrc).not.toContain("中继");
-  });
-
-  test("关键入口使用资讯源", () => {
-    expect(appSrc).toContain("资讯源管理");
-    expect(appSrc).toContain("资讯源在线");
-  });
-});
-
 describe("隐私头像开关（隐身模式）", () => {
   beforeEach(() => localStorage.clear());
 
@@ -550,5 +539,30 @@ describe("隐私头像开关（隐身模式）", () => {
   test("头像 img 与开关激活态样式存在", () => {
     expect(css).toContain(".avatar-mark img");
     expect(css).toContain(".icon-button.active");
+  });
+});
+
+describe("文案：中继在线 / 资讯中继管理 / utility bar hover 提示", () => {
+  test("标题状态显示 X/Y 中继在线", () => {
+    expect(appSrc).toContain("中继在线");
+    expect(appSrc).not.toContain("资讯源在线");
+  });
+
+  test("控制页面标题为资讯中继管理", () => {
+    expect(appSrc).toContain("<h2>资讯中继管理</h2>");
+    expect(appSrc).toContain('aria-label="打开资讯中继管理"');
+    expect(appSrc).toContain('aria-label="关闭资讯中继管理"');
+    expect(appSrc).not.toContain("资讯源管理");
+  });
+
+  test("utility bar 所有功能图标都有 hover 提示气泡", () => {
+    expect(appSrc).toContain('title="打开资讯中继管理"');
+    expect(appSrc).toContain('title="使用说明"');
+    expect(appSrc).toContain('title="版本更新，重新下载"');
+    expect(appSrc).toContain('title={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}');
+    expect(appSrc).toContain('title={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}');
+    // 早已存在的两个：
+    expect(appSrc).toContain('title={incognitoMode ? "隐身模式：不自动加载远程头像" : "普通模式：自动加载远程头像"}');
+    expect(appSrc).toContain('title={filtersActive(filters) ? "筛选已开启：隐藏回复 / 屏蔽关键词" : "筛选帖子：隐藏回复、屏蔽关键词"}');
   });
 });
