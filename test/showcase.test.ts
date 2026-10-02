@@ -13,10 +13,14 @@ import {
   buildReplyTags,
   buildThreadFilter,
   defaultUpdateEnv,
+  fetchRelayPicks,
   forceAppUpdate,
+  isRelayPicks,
   loadIncognitoMode,
   loadViewMode,
   mergeThreadEvents,
+  RELAY_PICKS_URL,
+  relayPicksUrl,
   saveIncognitoMode,
   saveViewMode,
   THREAD_REPLIES_LIMIT,
@@ -631,5 +635,72 @@ describe("帖子详情：手动快照的老帖子也能打开", () => {
     // 不查快照会导致点老帖子时详情打不开（点击展开全文没反应）。
     expect(lookup).toContain("manualEvents.find((event) => event.id === detailEventId)");
     expect(lookup).toContain("seenThreadEventsRef.current.get(detailEventId)");
+  });
+});
+
+describe("每日推荐中继（lulin.org API）", () => {
+  const sample = {
+    date: "2026-10-02",
+    generated_at: "2026-10-02T00:00:00+00:00",
+    pool_size: 93,
+    picks: [{ url: "wss://relay.damus.io", name: "Damus", description: "Damus strfry relay" }],
+  };
+
+  test("relayPicksUrl 带 ?date= 当日（避开 SW 缓存）", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    expect(RELAY_PICKS_URL).toBe("https://lulin.org/client/api/relay-picks.json");
+    expect(relayPicksUrl()).toBe(`${RELAY_PICKS_URL}?date=${today}`);
+  });
+
+  test("isRelayPicks 校验文档结构", () => {
+    expect(isRelayPicks(sample)).toBe(true);
+    expect(isRelayPicks({ date: "x", picks: [{ url: 42 }] })).toBe(false);
+    expect(isRelayPicks({ date: "x" })).toBe(false);
+    expect(isRelayPicks(null)).toBe(false);
+  });
+
+  test("fetchRelayPicks 首选当日 URL，404 时回退", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (url: string) => {
+      calls.push(url);
+      if (url.includes("?date=")) return { ok: false, status: 404 } as any;
+      return { ok: true, json: async () => sample } as any;
+    };
+    try {
+      const picks = await fetchRelayPicks();
+      expect(picks?.picks[0]?.url).toBe("wss://relay.damus.io");
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toContain("?date=");
+      expect(calls[1]).toBe(RELAY_PICKS_URL);
+    } finally {
+      (globalThis as any).fetch = realFetch;
+    }
+  });
+
+  test("fetchRelayPicks 全失败返回 null", async () => {
+    const realFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () => { throw new Error("down"); };
+    try {
+      expect(await fetchRelayPicks()).toBeNull();
+    } finally {
+      (globalThis as any).fetch = realFetch;
+    }
+  });
+
+  test("中继面板接线：打开面板拉取、推荐区 UI、加入按钮", () => {
+    expect(appSrc).toContain("fetchRelayPicks()");
+    expect(appSrc).toContain("if (!panelOpen) return;");
+    expect(appSrc).toContain("每日推荐");
+    expect(appSrc).toContain('className="relay-picks"');
+    expect(appSrc).toContain("addRelayUrl(pick.url)");
+    expect(appSrc).toContain("已在列表");
+    expect(appSrc).toContain("function addRelayUrl(url: string): boolean");
+  });
+
+  test("推荐区样式存在", () => {
+    expect(css).toContain(".relay-picks");
+    expect(css).toContain(".relay-pick-info");
+    expect(css).toContain(".pick-add");
   });
 });

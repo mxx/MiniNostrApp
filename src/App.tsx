@@ -722,6 +722,47 @@ export function loadRelays(): RelayConfig[] {
   }
 }
 
+/** 每日推荐中继 API（lulin.org）：按日期种子从收集中继池随机抽 3 个，附 NIP-11 简介。 */
+export const RELAY_PICKS_URL = "https://lulin.org/client/api/relay-picks.json";
+
+export type RelayPick = { url: string; name: string; description: string };
+export type RelayPicks = { date: string; pool_size: number; picks: RelayPick[] };
+
+/** 推荐 URL：?date= 避开 SW cache-first 缓存到的旧文件（每天换 URL 即换缓存键）。 */
+export function relayPicksUrl(date: Date = new Date()): string {
+  return `${RELAY_PICKS_URL}?date=${date.toISOString().slice(0, 10)}`;
+}
+
+export function isRelayPicks(value: unknown): value is RelayPicks {
+  if (typeof value !== "object" || value === null) return false;
+  const doc = value as Record<string, unknown>;
+  return (
+    typeof doc.date === "string" &&
+    Array.isArray(doc.picks) &&
+    doc.picks.every(
+      (pick) =>
+        typeof pick === "object" &&
+        pick !== null &&
+        typeof (pick as Record<string, unknown>).url === "string",
+    )
+  );
+}
+
+/** 拉取今日推荐；若当日文件尚未生成则回退到无参 URL（昨日的）。失败返回 null。 */
+export async function fetchRelayPicks(): Promise<RelayPicks | null> {
+  for (const url of [relayPicksUrl(), RELAY_PICKS_URL]) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const doc: unknown = await res.json();
+      if (isRelayPicks(doc)) return doc;
+    } catch {
+      // 换下一个 URL 试。
+    }
+  }
+  return null;
+}
+
 export function normalizeRelay(value: string): string | null {
   const trimmed = value.trim();
   try {
@@ -1115,6 +1156,8 @@ export function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [newRelay, setNewRelay] = useState("");
   const [relayError, setRelayError] = useState("");
+  const [relayPicks, setRelayPicks] = useState<RelayPicks | null>(null);
+  const [relayPicksLoading, setRelayPicksLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [pubkey, setPubkey] = useState<string | null>(null);
   const [signerError, setSignerError] = useState("");
@@ -1787,19 +1830,37 @@ export function App() {
 
   function addRelay(event: FormEvent) {
     event.preventDefault();
-    const normalized = normalizeRelay(newRelay);
+    if (addRelayUrl(newRelay)) setNewRelay("");
+  }
+
+  /** 把一个中继地址加入列表；供表单与每日推荐共用。成功返回 true。 */
+  function addRelayUrl(url: string): boolean {
+    const normalized = normalizeRelay(url);
     if (!normalized) {
       setRelayError("请输入有效的 wss:// 或 ws:// 资讯源地址。");
-      return;
+      return false;
     }
     if (relays.some((relay) => relay.url === normalized)) {
       setRelayError("这个资讯源已经在列表中。");
-      return;
+      return false;
     }
     setRelays((current) => [...current, { url: normalized, enabled: true }]);
-    setNewRelay("");
     setRelayError("");
+    return true;
   }
+
+  // 每日推荐：打开中继面板时拉取（每天换一批，date 对上才算新鲜）。
+  useEffect(() => {
+    if (!panelOpen) return;
+    const today = new Date().toISOString().slice(0, 10);
+    if (relayPicks && relayPicks.date === today) return;
+    if (relayPicksLoading) return;
+    setRelayPicksLoading(true);
+    void fetchRelayPicks().then((picks) => {
+      if (picks) setRelayPicks(picks);
+      setRelayPicksLoading(false);
+    });
+  }, [panelOpen, relayPicks, relayPicksLoading]);
 
   return (
     <div className={`app-shell ${viewMode === "auto" ? "auto-mode" : "manual-mode"}`}>
@@ -1972,6 +2033,33 @@ export function App() {
               <p className="field-hint">在 HTTPS 页面中，浏览器可能会拦截不加密的 ws:// 连接；客户端仍会保留该资讯源并显示实际连接状态。</p>
               {relayError && <p className="field-error">{relayError}</p>}
             </form>
+            {(relayPicks || relayPicksLoading) && (
+              <section className="relay-picks" aria-label="每日推荐中继">
+                <h3>每日推荐 <small>{relayPicks ? `${relayPicks.date} · 池中共 ${relayPicks.pool_size} 个` : ""}</small></h3>
+                <p className="field-hint">每天从收集中继池里随机推荐 3 个可能感兴趣的中继，一键加入。</p>
+                {relayPicksLoading && !relayPicks ? (
+                  <p className="muted">正在获取今日推荐…</p>
+                ) : (
+                  <ul className="relay-picks-list">
+                    {(relayPicks?.picks ?? []).map((pick) => {
+                      const added = relays.some((relay) => relay.url === pick.url);
+                      return (
+                        <li key={pick.url} className="relay-pick">
+                          <div className="relay-pick-info">
+                            <strong>{pick.name || relayLabel(pick.url)}</strong>
+                            <code>{pick.url}</code>
+                            {pick.description && <p>{pick.description}</p>}
+                          </div>
+                          {added
+                            ? <span className="pick-added">已在列表</span>
+                            : <button className="pick-add" onClick={() => void addRelayUrl(pick.url)}>加入</button>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </section>
+            )}
           </aside>
         </div>
       )}
