@@ -211,6 +211,15 @@ h2 { font-size: 24px; line-height: 1.08; }
 .detail-author strong { overflow: hidden; text-overflow: ellipsis; font: 700 13px/1.25 ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .detail-author small { color: var(--dim); font-size: 12px; }
 .detail-content { padding: 22px 0; overflow-wrap: anywhere; font-size: 17px; line-height: 1.68; }
+/* 帖子详情里的对话 thread：原帖之下的直接回复，按时间正序。 */
+.thread-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.thread-section h3 { margin: 0 0 12px; font-size: 14px; font-weight: 750; }
+.thread-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.thread-reply { padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.thread-reply-meta { display: grid; grid-template-columns: 31px minmax(0, auto) 1fr; align-items: center; gap: 9px; }
+.thread-reply-meta time { justify-self: end; color: var(--dim); font-size: 12px; }
+.thread-reply-body { width: 100%; margin-top: 8px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; font-size: 15px; line-height: 1.62; }
+.thread-reply-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
 .longform-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 20px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 750; white-space: nowrap; }
 .longform-open { width: 100%; display: grid; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .longform-open strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; letter-spacing: -0.01em; line-height: 1.3; }

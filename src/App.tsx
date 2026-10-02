@@ -55,6 +55,19 @@ type AuthorHistoryRequest = {
   mode: "initial" | "more";
 };
 
+/** 帖子详情里的对话 thread：该帖子的直接回复（kind-1 带 e 标签），按时间正序。 */
+type ThreadReplies = {
+  eventId: string;
+  events: NostrEvent[];
+  loading: boolean;
+};
+
+/** 进行中的 thread 拉取请求：跟踪每个订阅 id 的 EOSE。 */
+type ThreadRequest = {
+  eventId: string;
+  subIds: Set<string>;
+};
+
 type Profile = {
   name?: string;
   display_name?: string;
@@ -396,6 +409,27 @@ export function mergeHistoryEvents(current: NostrEvent[], incoming: NostrEvent[]
     merged.push(event);
   }
   merged.sort((a, b) => b.created_at - a.created_at);
+  return merged;
+}
+
+/** 对话 thread 拉取：每个帖子最多取这么多条直接回复。 */
+export const THREAD_REPLIES_LIMIT = 200;
+
+/** Thread 订阅的过滤器：按 e 标签拉指向该帖子的 kind-1 回复。 */
+export function buildThreadFilter(eventId: string): { kinds: number[]; "#e": string[]; limit: number } {
+  return { kinds: [1], "#e": [eventId], limit: THREAD_REPLIES_LIMIT };
+}
+
+/** 合并 thread 回复：按 id 去重，按时间正序（对话从早到晚）；不改动传入的数组。 */
+export function mergeThreadEvents(current: NostrEvent[], incoming: NostrEvent[]): NostrEvent[] {
+  const seen = new Set<string>();
+  const merged: NostrEvent[] = [];
+  for (const event of [...current, ...incoming]) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event);
+  }
+  merged.sort((a, b) => a.created_at - b.created_at);
   return merged;
 }
 
@@ -1091,6 +1125,10 @@ export function App() {
   const [profilePubkey, setProfilePubkey] = useState<string | null>(null);
   const [authorHistory, setAuthorHistory] = useState<AuthorHistory | null>(null);
   const authorHistoryRef = useRef<AuthorHistoryRequest | null>(null);
+  const [threadReplies, setThreadReplies] = useState<ThreadReplies | null>(null);
+  const threadRequestRef = useRef<ThreadRequest | null>(null);
+  // 钻取回复时详情可能指向主 events 之外的事件，这里缓存所有见过的 thread 回复供详情查找。
+  const seenThreadEventsRef = useRef(new Map<string, NostrEvent>());
   const [copyMessage, setCopyMessage] = useState("");
   const [profileCache, setProfileCache] = useState<Record<string, ProfileEntry>>(loadProfileCache);
   const [follows, setFollows] = useState<string[]>(() => loadStoredFollows(null));
@@ -1149,7 +1187,14 @@ export function App() {
 
   const enabledRelays = useMemo(() => relays.filter((relay) => relay.enabled), [relays]);
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;
-  const detailEvent = detailEventId ? events.find((event) => event.id === detailEventId) ?? null : null;
+  // 详情既可能来自主时间线，也可能来自手动模式的冻结快照（manualEvents），
+  // 还可能来自某条回复的钻取（thread 回复不在主 events 里）。
+  const detailEvent = detailEventId
+    ? events.find((event) => event.id === detailEventId)
+      ?? manualEvents.find((event) => event.id === detailEventId)
+      ?? seenThreadEventsRef.current.get(detailEventId)
+      ?? null
+    : null;
   const profileEvents = useMemo(() => {
     if (!profilePubkey) return [];
     const history = authorHistory && authorHistory.pubkey === profilePubkey ? authorHistory.events : [];
@@ -1231,6 +1276,7 @@ export function App() {
     setProfilePubkey(null);
     setDetailEventId(eventId);
     setCopyMessage("");
+    requestThreadReplies(eventId);
   }
 
   function addMutedKeyword() {
@@ -1338,6 +1384,67 @@ export function App() {
     if (oldest) requestAuthorHistory(profilePubkey, oldest.created_at - 1);
   }
 
+  function closeThreadSubs(): void {
+    const request = threadRequestRef.current;
+    if (!request) return;
+    for (const subId of request.subIds) {
+      for (const socket of socketsRef.current.values()) {
+        if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify(["CLOSE", subId]));
+          } catch {
+            // Ignore close failures; the relay will time the sub out.
+          }
+        }
+      }
+    }
+    threadRequestRef.current = null;
+  }
+
+  /** 帖子详情打开后单独订阅指向它的 kind-1 回复（e 标签）。 */
+  function requestThreadReplies(eventId: string): void {
+    closeThreadSubs();
+    setThreadReplies({ eventId, events: [], loading: true });
+    const filter = buildThreadFilter(eventId);
+    const subIds = new Set<string>();
+    for (const socket of socketsRef.current.values()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      const subId = `thread-${createUuid().slice(0, 8)}`;
+      try {
+        socket.send(JSON.stringify(["REQ", subId, filter]));
+        subIds.add(subId);
+      } catch {
+        // Skip a socket that refuses the request.
+      }
+    }
+    const request: ThreadRequest = { eventId, subIds };
+    threadRequestRef.current = request;
+    if (subIds.size === 0) {
+      finishThreadReplies(eventId);
+      return;
+    }
+    // 兜底：个别资讯源不回 EOSE 时，15 秒后也结束 loading，避免一直转圈。
+    window.setTimeout(() => {
+      if (threadRequestRef.current === request) finishThreadReplies(eventId);
+    }, 15000);
+  }
+
+  /** 收齐（或超时）后结束一次 thread 拉取。 */
+  function finishThreadReplies(eventId: string): void {
+    const request = threadRequestRef.current;
+    if (!request || request.eventId !== eventId) return;
+    threadRequestRef.current = null;
+    setThreadReplies((prev) => (prev && prev.eventId === eventId ? { ...prev, loading: false } : prev));
+  }
+
+  // 帖子详情关闭时收回 thread 订阅并清空回复，避免后台继续收该帖的事件。
+  useEffect(() => {
+    if (detailEventId) return;
+    closeThreadSubs();
+    setThreadReplies(null);
+    seenThreadEventsRef.current.clear();
+  }, [detailEventId]);
+
   async function copyValue(value: string, label: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -1405,7 +1512,10 @@ export function App() {
 
   // Fetch kind-0 profiles for authors we have not seen recently. Runs on new
   // authors and on reconnect (requested set is cleared when epoch changes).
-  const wantedAuthors = useMemo(() => [...new Set(events.map((event) => event.pubkey))], [events]);
+  const wantedAuthors = useMemo(() => [...new Set([
+    ...events.map((event) => event.pubkey),
+    ...(threadReplies?.events.map((event) => event.pubkey) ?? []),
+  ])], [events, threadReplies]);
   const profileEpochRef = useRef(connectionEpoch);
   useEffect(() => {
     if (profileEpochRef.current !== connectionEpoch) {
@@ -1509,6 +1619,16 @@ export function App() {
                   addProfile(incoming);
                 } else if (frame[1] === contactSubRef.current && isNostrEvent(incoming, 3)) {
                   addContactList(incoming);
+                } else {
+                  const threadRequest = threadRequestRef.current;
+                  if (threadRequest && threadRequest.subIds.has(frame[1]) && isNostrEvent(incoming, 1)) {
+                    const threadEvent: NostrEvent = { ...incoming, relays: [relay.url] };
+                    const wanted = threadRequest.eventId;
+                    seenThreadEventsRef.current.set(threadEvent.id, threadEvent);
+                    setThreadReplies((prev) => (prev && prev.eventId === wanted
+                      ? { ...prev, events: mergeThreadEvents(prev.events, [threadEvent]) }
+                      : prev));
+                  }
                 }
               }
               if (frame[0] === "EOSE" && typeof frame[1] === "string") {
@@ -1516,6 +1636,11 @@ export function App() {
                 if (historyRequest && historyRequest.subIds.has(frame[1])) {
                   historyRequest.subIds.delete(frame[1]);
                   if (historyRequest.subIds.size === 0) finishAuthorHistory(historyRequest.pubkey);
+                }
+                const threadRequest = threadRequestRef.current;
+                if (threadRequest && threadRequest.subIds.has(frame[1])) {
+                  threadRequest.subIds.delete(frame[1]);
+                  if (threadRequest.subIds.size === 0) finishThreadReplies(threadRequest.eventId);
                 }
               }
               if (frame[0] === "OK" && typeof frame[1] === "string" && typeof frame[2] === "boolean") {
@@ -1867,7 +1992,7 @@ export function App() {
               <h3>资讯源</h3>
               <p>点左上角的在线状态打开资讯中继管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。连接失败时会在该资讯源下方显示原因（如被浏览器拦截、超时等）。</p>
               <h3>发帖与回复</h3>
-              <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。</p>
+              <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。点帖子进入详情可以看到它的对话：下面的回复按时间正序排列，点某条回复可以继续钻进去看它的回复。</p>
               <h3>关注</h3>
               <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
               <h3>长文</h3>
@@ -1987,6 +2112,38 @@ export function App() {
             <div className="detail-actions">
               <button className="reply-button" onClick={() => openReply(detailEvent)}><Icon name="reply" />回复这条帖子</button>
             </div>
+            <section className="thread-section" aria-label="对话回复">
+              <h3>对话{threadReplies && threadReplies.eventId === detailEvent.id && !threadReplies.loading ? `（${threadReplies.events.length} 条回复）` : ""}</h3>
+              {!threadReplies || threadReplies.eventId !== detailEvent.id || threadReplies.loading ? (
+                <p className="muted">{threadReplies && threadReplies.events.length > 0 ? `正在拉取回复…（已收到 ${threadReplies.events.length} 条）` : "正在从中继拉取回复…"}</p>
+              ) : threadReplies.events.length === 0 ? (
+                <p className="muted">暂无回复，来抢沙发。</p>
+              ) : (
+                <ol className="thread-list">
+                  {threadReplies.events.map((reply) => (
+                    <li key={reply.id} className="thread-reply">
+                      <div className="thread-reply-meta">
+                        <AvatarMark
+                          pubkey={reply.pubkey}
+                          profileCache={profileCache}
+                          incognito={incognitoMode}
+                          onClick={() => openProfile(reply.pubkey)}
+                          ariaLabel={`查看作者 ${profileName(reply.pubkey, profileCache)}`}
+                        />
+                        <button className="author" onClick={() => openProfile(reply.pubkey)} title={reply.pubkey}>{profileName(reply.pubkey, profileCache)}</button>
+                        <time dateTime={new Date(reply.created_at * 1000).toISOString()}>{relativeTime(reply.created_at)}</time>
+                      </div>
+                      <button className="thread-reply-body" onClick={() => openNote(reply.id)} aria-label={`查看回复 ${shortKey(encodeNip19("note", reply.id))}`}>
+                        <FormattedNote content={reply.content} />
+                      </button>
+                      <div className="thread-reply-actions">
+                        <button className="reply-button" onClick={() => openReply(reply)} aria-label={`回复 ${profileName(reply.pubkey, profileCache)}`}><Icon name="reply" />回复</button>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
             {copyMessage && <p className="copy-status" role="status">{copyMessage}</p>}
           </article>
         </div>

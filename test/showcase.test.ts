@@ -11,12 +11,15 @@ import {
   autoGridWindow,
   avatarDisplay,
   buildReplyTags,
+  buildThreadFilter,
   defaultUpdateEnv,
   forceAppUpdate,
   loadIncognitoMode,
   loadViewMode,
+  mergeThreadEvents,
   saveIncognitoMode,
   saveViewMode,
+  THREAD_REPLIES_LIMIT,
 } from "../src/App";
 import {
   APP_VERSION_PLACEHOLDER,
@@ -564,5 +567,69 @@ describe("文案：中继在线 / 资讯中继管理 / utility bar hover 提示"
     // 早已存在的两个：
     expect(appSrc).toContain('title={incognitoMode ? "隐身模式：不自动加载远程头像" : "普通模式：自动加载远程头像"}');
     expect(appSrc).toContain('title={filtersActive(filters) ? "筛选已开启：隐藏回复 / 屏蔽关键词" : "筛选帖子：隐藏回复、屏蔽关键词"}');
+  });
+});
+
+describe("对话 thread（帖子详情里的回复）", () => {
+  const note = (id: string, created_at: number) => ({
+    id, pubkey: SAMPLE_HEX_PUBKEY, created_at, kind: 1, content: "x", sig: "s", tags: [], relays: ["wss://x"],
+  });
+
+  test("buildThreadFilter 按 e 标签拉回复", () => {
+    expect(buildThreadFilter("abc123")).toEqual({ kinds: [1], "#e": ["abc123"], limit: THREAD_REPLIES_LIMIT });
+    expect(THREAD_REPLIES_LIMIT).toBe(200);
+  });
+
+  test("mergeThreadEvents 去重并按时间正序", () => {
+    const a = note("a", 300);
+    const b = note("b", 100);
+    const c = note("c", 200);
+    const merged = mergeThreadEvents([a], [b, c, { ...a }]);
+    expect(merged.map((e) => e.id)).toEqual(["b", "c", "a"]);
+  });
+
+  test("打开详情时订阅 thread，消息路由收回复", () => {
+    expect(appSrc).toContain("requestThreadReplies(eventId)");
+    expect(appSrc).toContain("buildThreadFilter(eventId)");
+    expect(appSrc).toContain("`thread-${createUuid().slice(0, 8)}`");
+    expect(appSrc).toContain("threadRequestRef.current");
+    expect(appSrc).toContain("setThreadReplies");
+    expect(appSrc).toContain("finishThreadReplies");
+  });
+
+  test("详情关闭时收回 thread 订阅并清空", () => {
+    expect(appSrc).toContain("closeThreadSubs()");
+  });
+
+  test("详情页渲染对话区", () => {
+    expect(appSrc).toContain('className="thread-section"');
+    expect(appSrc).toContain('className="thread-list"');
+    expect(appSrc).toContain("条回复");
+    expect(appSrc).toContain("暂无回复");
+  });
+
+  test("thread 样式存在", () => {
+    expect(css).toContain(".thread-section");
+    expect(css).toContain(".thread-list");
+    expect(css).toContain(".thread-reply");
+  });
+});
+
+describe("对话 thread：详情事件来源", () => {
+  test("详情优先从主 events 取，缺失时回退 thread 缓存", () => {
+    expect(appSrc).toContain("seenThreadEventsRef.current.get(detailEventId)");
+    expect(appSrc).toContain("seenThreadEventsRef.current.set(threadEvent.id, threadEvent)");
+    expect(appSrc).toContain("seenThreadEventsRef.current.clear()");
+  });
+});
+
+describe("帖子详情：手动快照的老帖子也能打开", () => {
+  test("detailEvent 同时查 events、manualEvents 与 thread 缓存", () => {
+    const lookup = appSrc.match(/const detailEvent =[\s\S]*?: null;/)?.[0] ?? "";
+    expect(lookup).toContain("events.find((event) => event.id === detailEventId)");
+    // 手动模式卡片来自冻结快照 manualEvents，而 events 只保留最新 120 条；
+    // 不查快照会导致点老帖子时详情打不开（点击展开全文没反应）。
+    expect(lookup).toContain("manualEvents.find((event) => event.id === detailEventId)");
+    expect(lookup).toContain("seenThreadEventsRef.current.get(detailEventId)");
   });
 });
