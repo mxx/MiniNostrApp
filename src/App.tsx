@@ -433,6 +433,34 @@ export function mergeThreadEvents(current: NostrEvent[], incoming: NostrEvent[])
   return merged;
 }
 
+/** 关注人帖子订阅：每个中继按关注列表取最近这么多条 kind-1。 */
+export const FOLLOW_POSTS_LIMIT = 30;
+
+/** 关注人帖子在本地最多保留这么多条。 */
+export const MAX_FOLLOW_EVENTS = 300;
+
+/** 关注人订阅的过滤器：按关注列表的作者拉 kind-1。 */
+export function buildFollowFilter(authors: string[]): { kinds: number[]; authors: string[]; limit: number } {
+  return { kinds: [1], authors, limit: FOLLOW_POSTS_LIMIT };
+}
+
+/**
+ * 关注标签页的帖子：当前信息流里关注人的帖子 + 关注人专属订阅拉到的帖子，
+ * 按 id 去重、按时间倒序。专属订阅保证关注的人即使很久没出现在公共信息流里，
+ * 他的最近帖子也能显示；不过滤掉已取消关注的人。
+ */
+export function mergeFollowingFeed(
+  feedEvents: NostrEvent[],
+  followEvents: NostrEvent[],
+  follows: string[],
+): NostrEvent[] {
+  const isFollowed = (event: NostrEvent) => follows.includes(event.pubkey);
+  return mergeHistoryEvents(
+    feedEvents.filter(isFollowed),
+    followEvents.filter(isFollowed),
+  );
+}
+
 /** NIP-23 长文事件 kind。 */
 export const LONGFORM_KIND = 30023;
 /** 长文订阅每源最多取这么多条。 */
@@ -1175,6 +1203,13 @@ export function App() {
   const [copyMessage, setCopyMessage] = useState("");
   const [profileCache, setProfileCache] = useState<Record<string, ProfileEntry>>(loadProfileCache);
   const [follows, setFollows] = useState<string[]>(() => loadStoredFollows(null));
+  // 关注人专属订阅拉到的帖子：公共信息流只保留最新 N 条，关注的人若很久没发帖
+  // 就不在其中；这个订阅按作者取他们的最近帖子，保证「关注」标签页有内容。
+  const [followEvents, setFollowEvents] = useState<NostrEvent[]>([]);
+  const followsRef = useRef<string[]>(follows);
+  // 正在生效的关注人订阅 id（onmessage 路由用）与每个中继的订阅 id（换关注列表时 CLOSE 用）。
+  const followSubIdsRef = useRef<Set<string>>(new Set());
+  const followSubByRelayRef = useRef<Map<string, string>>(new Map());
   const [feedTab, setFeedTab] = useState<"all" | "longform" | "following">("all");
   const [followsOpen, setFollowsOpen] = useState(false);
   const [followMessage, setFollowMessage] = useState("");
@@ -1245,7 +1280,7 @@ export function App() {
     return mergeHistoryEvents(history, fromFeed);
   }, [profilePubkey, events, authorHistory]);
   const feedEvents = viewMode === "manual" ? manualEvents : events;
-  const visibleEvents = feedTab === "following" ? feedEvents.filter((event) => follows.includes(event.pubkey)) : feedEvents;
+  const visibleEvents = feedTab === "following" ? mergeFollowingFeed(feedEvents, followEvents, follows) : feedEvents;
   // 本地筛选（隐藏回复 / 关键词屏蔽）：只影响展示，不改变订阅。
   const displayEvents = useMemo(() => applyFilters(visibleEvents, filters), [visibleEvents, filters]);
   const hiddenByFilters = visibleEvents.length - displayEvents.length;
@@ -1557,8 +1592,9 @@ export function App() {
   // authors and on reconnect (requested set is cleared when epoch changes).
   const wantedAuthors = useMemo(() => [...new Set([
     ...events.map((event) => event.pubkey),
+    ...followEvents.map((event) => event.pubkey),
     ...(threadReplies?.events.map((event) => event.pubkey) ?? []),
-  ])], [events, threadReplies]);
+  ])], [events, followEvents, threadReplies]);
   const profileEpochRef = useRef(connectionEpoch);
   useEffect(() => {
     if (profileEpochRef.current !== connectionEpoch) {
@@ -1603,6 +1639,9 @@ export function App() {
     const timeout = window.setTimeout(() => {
       for (const socket of socketsRef.current.values()) socket.close();
       socketsRef.current.clear();
+      // 旧连接的关注人订阅随 socket 一起失效，清掉路由记录（新连接的 onopen 会重建）。
+      followSubIdsRef.current.clear();
+      followSubByRelayRef.current.clear();
 
       const nextStates: Record<string, RelayState> = {};
       for (const relay of relays) nextStates[relay.url] = relay.enabled ? "connecting" : "offline";
@@ -1639,7 +1678,16 @@ export function App() {
             setRelayStates((current) => ({ ...current, [relay.url]: "online" }));
             socket.send(JSON.stringify(["REQ", subId, { kinds: [1], limit: 60 }]));
             socket.send(JSON.stringify(["REQ", longformSubId, { kinds: [LONGFORM_KIND], limit: LONGFORM_LIMIT }]));
-          };
+            // 关注人专属订阅：公共信息流只保留最新 60 条/中继，关注的人若不在其中，
+            // 「关注」标签页就是空的；按作者单独拉一次，保证关注的人有帖子可看。
+            // 保持开启可收到关注人的新帖子；关注列表变化时由下面的 effect 换订阅。
+            const followAuthors = followsRef.current;
+            if (followAuthors.length > 0) {
+              const followSubId = `following-${createUuid().slice(0, 8)}`;
+              followSubIdsRef.current.add(followSubId);
+              followSubByRelayRef.current.set(relay.url, followSubId);
+              socket.send(JSON.stringify(["REQ", followSubId, buildFollowFilter(followAuthors)]));
+            }          };
           socket.onmessage = (message) => {
             try {
               const frame: unknown = JSON.parse(String(message.data));
@@ -1658,6 +1706,9 @@ export function App() {
                   addIncomingEvent(incoming, relay.url);
                 } else if (frame[1] === longformSubId && isNostrEvent(incoming, LONGFORM_KIND)) {
                   addLongformEvent(incoming, relay.url);
+                } else if (followSubIdsRef.current.has(frame[1]) && isNostrEvent(incoming, 1)) {
+                  const followEvent: NostrEvent = { ...incoming, relays: [relay.url] };
+                  setFollowEvents((prev) => mergeHistoryEvents(prev, [followEvent]).slice(0, MAX_FOLLOW_EVENTS));
                 } else if (profileSubsRef.current.has(frame[1]) && isNostrEvent(incoming, 0)) {
                   addProfile(incoming);
                 } else if (frame[1] === contactSubRef.current && isNostrEvent(incoming, 3)) {
@@ -1722,6 +1773,28 @@ export function App() {
       socketsRef.current.clear();
     };
   }, [relays, connectionEpoch, addIncomingEvent, addLongformEvent]);
+
+  // 关注列表变化时，在已连上的中继上换掉关注人订阅（先 CLOSE 旧的再 REQ 新的），
+  // 不必重建整个连接。followsRef 供新连接的 onopen 读取，保证重连后订阅也是最新的。
+  useEffect(() => {
+    followsRef.current = follows;
+    for (const [url, socket] of socketsRef.current) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      const oldSubId = followSubByRelayRef.current.get(url);
+      if (oldSubId) {
+        socket.send(JSON.stringify(["CLOSE", oldSubId]));
+        followSubIdsRef.current.delete(oldSubId);
+        followSubByRelayRef.current.delete(url);
+      }
+      if (follows.length > 0) {
+        const followSubId = `following-${createUuid().slice(0, 8)}`;
+        followSubIdsRef.current.add(followSubId);
+        followSubByRelayRef.current.set(url, followSubId);
+        socket.send(JSON.stringify(["REQ", followSubId, buildFollowFilter(follows)]));
+      }
+    }
+    if (follows.length === 0) setFollowEvents([]);
+  }, [follows]);
 
   async function connectSigner(): Promise<string | null> {
     setSignerError("");
@@ -1958,8 +2031,8 @@ export function App() {
         ) : displayEvents.length === 0 ? (
           <section className="empty-state">
             <div className="empty-signal"><span /><span /><span /></div>
-            <h2>{hiddenByFilters > 0 ? "筛选隐藏了全部帖子" : feedTab === "following" ? "还没有关注的人" : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
-            <p>{hiddenByFilters > 0 ? `${hiddenByFilters} 条帖子被当前筛选条件隐藏。` : feedTab === "following" ? "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。" : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开资讯源面板查看每个地址的状态，或添加一个可用资讯源。"}</p>
+            <h2>{hiddenByFilters > 0 ? "筛选隐藏了全部帖子" : feedTab === "following" ? (follows.length > 0 ? "关注的人还没有新帖子" : "还没有关注的人") : onlineCount > 0 ? "正在等待帖子" : "还没有连上资讯源"}</h2>
+            <p>{hiddenByFilters > 0 ? `${hiddenByFilters} 条帖子被当前筛选条件隐藏。` : feedTab === "following" ? (follows.length > 0 ? "已经向资讯源请求了你关注的人的最近帖子，他们发了新帖子会显示在这里。" : "在帖子或作者页点「关注」，这里只显示你关注的人的帖子。") : onlineCount > 0 ? "连接已建立，新帖子会直接出现在这里。" : "打开资讯源面板查看每个地址的状态，或添加一个可用资讯源。"}</p>
             <button onClick={() => hiddenByFilters > 0 ? setFilters({ hideReplies: false, mutedKeywords: [] }) : feedTab === "following" ? setFeedTab("all") : onlineCount > 0 ? (viewMode === "manual" ? refreshManualFeed() : setConnectionEpoch((value) => value + 1)) : setPanelOpen(true)}>
               {hiddenByFilters > 0 ? "清除筛选" : feedTab === "following" ? "浏览全部帖子" : onlineCount > 0 ? (viewMode === "manual" ? "手动刷新" : "重新订阅") : "管理资讯源"}
             </button>
@@ -2082,7 +2155,7 @@ export function App() {
               <h3>发帖与回复</h3>
               <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。点帖子进入详情可以看到它的对话：下面的回复按时间正序排列，点某条回复可以继续钻进去看它的回复。</p>
               <h3>关注</h3>
-              <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
+              <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子，打开标签页时会自动向资讯源请求他们的最近帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
               <h3>长文</h3>
               <p>「长文」标签页显示资讯源里的 NIP-23 长文（kind 30023），每源最多取 20 篇；同作者同标识的长文只保留最新版。点卡片进入全文阅读，支持标题、粗斜体、链接、列表、引用、代码块等排版，表格暂不支持。隐身模式下文章内的图片不会自动加载。</p>
               <h3>筛选</h3>
