@@ -45,6 +45,11 @@ npx serve dist
 
 构建产物在 `dist/`，直接丢到任何静态文件服务器即可。
 
+## 依赖
+
+- 运行时依赖由上层 `ts-spaces/nostr-2/package.json` 提供（`bun install` 在 `ts-spaces/nostr-2/` 下执行）。
+- NIP-46 远程签名需要 `nostr-tools`（NIP-44 加密、Schnorr 签名 24133 信封）。
+
 ## 测试
 
 ```bash

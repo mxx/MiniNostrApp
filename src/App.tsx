@@ -9,6 +9,47 @@ type FormEvent,
 type ReactNode,
 type CSSProperties,
 } from "react";
+import {
+Nip46AuthRequiredError,
+NostrConnectClient,
+parseBunkerUri,
+type Nip46Session,
+type SignedNostrEvent,
+type UnsignedEventDraft,
+} from "./nostrconnect";
+
+/** 本地持久化的 NIP-46 会话键。 */
+const NIP46_SESSION_KEY = "nostr-min-nip46-session-v1";
+
+/** 统一签名器接口：NIP-07 浏览器扩展与 NIP-46 远程签名器都实现它。 */
+type AppSigner = {
+  readonly signerType: "nip07" | "nip46";
+  getPublicKey(): Promise<string>;
+  signEvent(draft: UnsignedEventDraft): Promise<SignedNostrEvent>;
+};
+
+function loadNip46Session(): Nip46Session | null {
+  try {
+    const raw = localStorage.getItem(NIP46_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<Nip46Session>;
+    if (
+      typeof parsed.clientSecretHex !== "string" ||
+      typeof parsed.remotePubkey !== "string" ||
+      typeof parsed.relayUrl !== "string"
+    ) {
+      return null;
+    }
+    return {
+      clientSecretHex: parsed.clientSecretHex,
+      remotePubkey: parsed.remotePubkey,
+      relayUrl: parsed.relayUrl,
+      userPubkey: typeof parsed.userPubkey === "string" ? parsed.userPubkey : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 type RelayState = "connecting" | "online" | "offline";
 
@@ -1189,6 +1230,13 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [pubkey, setPubkey] = useState<string | null>(null);
   const [signerError, setSignerError] = useState("");
+  const [signerType, setSignerType] = useState<"nip07" | "nip46" | null>(null);
+  const [identityOpen, setIdentityOpen] = useState(false);
+  const [nip46Uri, setNip46Uri] = useState("");
+  const [nip46Error, setNip46Error] = useState("");
+  const [nip46Busy, setNip46Busy] = useState(false);
+  const nip46ClientRef = useRef<NostrConnectClient | null>(null);
+  const nip46SecretRef = useRef<string | null>(null);
   const [publishStatus, setPublishStatus] = useState<PublishStatus | null>(null);
   const [networkMessage, setNetworkMessage] = useState("");
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -1796,15 +1844,48 @@ export function App() {
     if (follows.length === 0) setFollowEvents([]);
   }, [follows]);
 
+  /** 当前生效的签名器（NIP-07 扩展或 NIP-46 远端），未连接时为 null。 */
+  function activeSigner(): AppSigner | null {
+    if (signerType === "nip46" && nip46ClientRef.current) {
+      const client = nip46ClientRef.current;
+      const secret = nip46SecretRef.current;
+      return {
+        signerType: "nip46",
+        getPublicKey: () => client.getPublicKey(secret),
+        signEvent: (draft) => client.signEvent(draft, secret),
+      };
+    }
+    if (signerType === "nip07" && window.nostr) return { signerType: "nip07", getPublicKey: () => window.nostr!.getPublicKey(), signEvent: (draft) => window.nostr!.signEvent(draft) as Promise<SignedNostrEvent> };
+    return null;
+  }
+
+  function persistNip46Session(session: Nip46Session): void {
+    try {
+      localStorage.setItem(NIP46_SESSION_KEY, JSON.stringify(session));
+    } catch {
+      /* 存储失败不阻塞使用 */
+    }
+  }
+
+  function clearNip46Session(): void {
+    try {
+      localStorage.removeItem(NIP46_SESSION_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function connectSigner(): Promise<string | null> {
     setSignerError("");
     if (!window.nostr) {
-      setSignerError("未检测到 NIP-07 签名器。请在支持浏览器扩展的环境中安装并启用签名器后重试。");
+      setSignerError("未检测到 NIP-07 签名器。手机上可以用「远程签名器（NIP-46）」连接。");
+      setIdentityOpen(true);
       return null;
     }
     try {
       const key = await window.nostr.getPublicKey();
       setPubkey(key);
+      setSignerType("nip07");
       return key;
     } catch {
       setSignerError("签名器未授权连接。你仍可匿名浏览帖子。");
@@ -1812,18 +1893,106 @@ export function App() {
     }
   }
 
+  /** 用 bunker:// 连接串配对 NIP-46 远端签名器。 */
+  async function connectNip46(uri: string): Promise<boolean> {
+    setNip46Error("");
+    setNip46Busy(true);
+    let parsed;
+    try {
+      parsed = parseBunkerUri(uri);
+    } catch (error) {
+      setNip46Error(error instanceof Error ? error.message : "连接串无法解析");
+      setNip46Busy(false);
+      return false;
+    }
+    const relayUrl = parsed.relays[0];
+    if (!relayUrl) {
+      setNip46Error("连接串中没有可用的 relay 地址");
+      setNip46Busy(false);
+      return false;
+    }
+    const session = NostrConnectClient.newSession(parsed.remotePubkey, relayUrl);
+    const client = new NostrConnectClient(session);
+    try {
+      await client.connect();
+      const userPubkey = await client.getPublicKey(parsed.secret);
+      nip46ClientRef.current = client;
+      nip46SecretRef.current = parsed.secret;
+      setPubkey(userPubkey);
+      setSignerType("nip46");
+      persistNip46Session({ ...session, userPubkey });
+      setNip46Uri("");
+      setIdentityOpen(false);
+      return true;
+    } catch (error) {
+      client.close();
+      if (error instanceof Nip46AuthRequiredError) {
+        setNip46Error(`签名器要求额外验证，请在新页面完成：${error.authUrl}`);
+      } else {
+        setNip46Error(error instanceof Error ? error.message : "连接远端签名器失败");
+      }
+      return false;
+    } finally {
+      setNip46Busy(false);
+    }
+  }
+
+  function disconnectSigner(): void {
+    if (nip46ClientRef.current) {
+      try {
+        nip46ClientRef.current.close();
+      } catch {
+        /* ignore */
+      }
+      nip46ClientRef.current = null;
+    }
+    nip46SecretRef.current = null;
+    clearNip46Session();
+    setSignerType(null);
+    setPubkey(null);
+    setIdentityOpen(false);
+  }
+
+  // 启动时恢复上次的 NIP-46 会话：只重建通道与身份，不自动握手，
+  // 首次签名时再完成 connect（签名器那边已授权过该 client keypair）。
+  useEffect(() => {
+    const session = loadNip46Session();
+    if (!session) return;
+    let cancelled = false;
+    try {
+      const client = new NostrConnectClient(session);
+      nip46ClientRef.current = client;
+      nip46SecretRef.current = null;
+      if (session.userPubkey) {
+        setPubkey(session.userPubkey);
+        setSignerType("nip46");
+      }
+      void client.connect().catch(() => {
+        if (!cancelled) {
+          // relay 暂时连不上：保持身份显示，用户点发帖时会重试。
+        }
+      });
+    } catch {
+      clearNip46Session();
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /** 签名并发布一条 kind-1 帖子；tags 为空是普通帖子，带 e/p 标签即为回复。 */
   async function publishNote(content: string, tags: string[][]): Promise<boolean> {
     setSignerError("");
     const currentPubkey = pubkey ?? await connectSigner();
-    if (!currentPubkey || !window.nostr) return false;
+    const signer = activeSigner();
+    if (!currentPubkey || !signer) return false;
     const liveSockets = [...socketsRef.current.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
     if (liveSockets.length === 0) {
       setNetworkMessage("当前没有在线资讯源，无法发布。请检查资讯源面板后重试。");
       return false;
     }
     try {
-      const signed = await window.nostr.signEvent({
+      const signed = await signer.signEvent({
         kind: 1,
         created_at: Math.floor(Date.now() / 1000),
         tags,
@@ -1866,10 +2035,11 @@ export function App() {
     const following = follows.includes(target);
     const next = following ? follows.filter((item) => item !== target) : [...follows, target];
     setFollows(next);
-    if (pubkey && window.nostr) {
+    const signer = activeSigner();
+    if (pubkey && signer) {
       try {
         const base = contactBaseRef.current;
-        const signed = await window.nostr.signEvent({
+        const signed = await signer.signEvent({
           kind: 3,
           created_at: Math.floor(Date.now() / 1000),
           tags: mergeContactTags(base?.tags, next),
@@ -1965,7 +2135,7 @@ export function App() {
           <button className="icon-button" onClick={() => setHelpOpen(true)} aria-label="使用说明" title="使用说明"><Icon name="help" /></button>
           <button className="icon-button" onClick={() => void forceAppUpdate(defaultUpdateEnv())} aria-label="版本更新，重新下载" title="版本更新，重新下载"><Icon name="download" /></button>
           <button className="icon-button" onClick={viewMode === "manual" ? refreshManualFeed : () => setConnectionEpoch((value) => value + 1)} aria-label={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"} title={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}><Icon name="refresh" /></button>
-          <button className="identity-button" onClick={() => void connectSigner()} aria-label={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"} title={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}>
+          <button className="identity-button" onClick={() => { setSignerError(""); setNip46Error(""); setIdentityOpen(true); }} aria-label={pubkey ? "查看已连接身份" : "连接签名器"} title={pubkey ? `已连接（${signerType === "nip46" ? "远程签名器" : "浏览器扩展"}），点击管理` : "连接签名器"}>
             <Icon name="key" />
             <span>{pubkey ? shortKey(pubkey) : "连接签名器"}</span>
           </button>
@@ -2137,6 +2307,49 @@ export function App() {
         </div>
       )}
 
+      {identityOpen && (
+        <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setIdentityOpen(false); }}>
+          <aside className="relay-sheet" aria-label="身份与签名器" role="dialog" aria-modal="true">
+            <div className="sheet-heading">
+              <div><p className="section-index">IDENTITY</p><h2>身份与签名器</h2></div>
+              <button className="icon-button" onClick={() => setIdentityOpen(false)} aria-label="关闭身份面板"><Icon name="close" /></button>
+            </div>
+            {pubkey ? (
+              <>
+                <p className="sheet-copy">已连接{signerType === "nip46" ? "远程签名器（NIP-46）" : "浏览器扩展（NIP-07）"}，发帖、回复与关注将使用该身份签名。</p>
+                <div className="relay-row">
+                  <div className="relay-address"><strong>{shortKey(encodeNip19("npub", pubkey))}</strong><code>{encodeNip19("npub", pubkey)}</code></div>
+                </div>
+                <form className="add-relay" onSubmit={(event) => { event.preventDefault(); disconnectSigner(); }}>
+                  <button type="submit">断开连接</button>
+                </form>
+              </>
+            ) : (
+              <>
+                <p className="sheet-copy">发帖、回复与关注需要签名器。私钥始终不出签名器。</p>
+                <section aria-label="浏览器扩展">
+                  <h3>浏览器扩展（NIP-07）</h3>
+                  <form className="add-relay" onSubmit={(event) => { event.preventDefault(); void connectSigner().then((key) => { if (key) setIdentityOpen(false); }); }}>
+                    <button type="submit">连接扩展签名器</button>
+                  </form>
+                  {signerError && <p className="field-error">{signerError}</p>}
+                </section>
+                <section aria-label="远程签名器">
+                  <h3>远程签名器（NIP-46）</h3>
+                  <p className="field-hint">手机浏览器装不了插件时用这个：在签名器 App（如 nsec.app）里生成 bunker:// 连接串，粘贴到下面。</p>
+                  <form className="add-relay" onSubmit={(event) => { event.preventDefault(); void connectNip46(nip46Uri); }}>
+                    <label htmlFor="nip46-uri">签名器连接串</label>
+                    <div><input id="nip46-uri" value={nip46Uri} onChange={(event) => setNip46Uri(event.target.value)} placeholder="bunker://…" inputMode="url" autoCapitalize="none" autoCorrect="off" autoComplete="off" /><button type="submit" aria-label="连接远程签名器" disabled={nip46Busy}><Icon name="plus" /></button></div>
+                    {nip46Busy && <p className="field-hint">正在连接签名器…</p>}
+                    {nip46Error && <p className="field-error">{nip46Error}</p>}
+                  </form>
+                </section>
+              </>
+            )}
+          </aside>
+        </div>
+      )}
+
       {helpOpen && (
         <div className="sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
           <aside className="relay-sheet" aria-label="使用说明" role="dialog" aria-modal="true">
@@ -2153,7 +2366,7 @@ export function App() {
               <h3>资讯源</h3>
               <p>点左上角的在线状态打开资讯中继管理：可以开关、添加、删除地址，支持加密的 wss:// 与不加密的 ws://，修改后自动重连。连接失败时会在该资讯源下方显示原因（如被浏览器拦截、超时等）。</p>
               <h3>发帖与回复</h3>
-              <p>需要浏览器安装 NIP-07 签名器（如 nos2x、Alby），点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。点帖子进入详情可以看到它的对话：下面的回复按时间正序排列，点某条回复可以继续钻进去看它的回复。</p>
+              <p>需要连接签名器：桌面浏览器可安装 NIP-07 扩展（如 nos2x、Alby），手机浏览器装不了插件时可用「远程签名器（NIP-46）」——在签名器 App 里生成 bunker:// 连接串粘贴进来。点右上角钥匙图标连接。发帖和回复都经签名器签名后发布。点帖子进入详情可以看到它的对话：下面的回复按时间正序排列，点某条回复可以继续钻进去看它的回复。</p>
               <h3>关注</h3>
               <p>在帖子或作者页点「关注」，「关注」标签页只显示你关注的人的帖子，打开标签页时会自动向资讯源请求他们的最近帖子。打开作者页会自动向资讯源拉取他的历史帖子（每次最多 200 条），点「加载更早」可继续往前翻，能拉多少取决于资讯源保留了多少。</p>
               <h3>长文</h3>
@@ -2245,7 +2458,7 @@ export function App() {
                 <span>{draft.length}/4000</span>
                 <button className="publish-button" type="submit" disabled={!draft.trim()}>{pubkey ? "签名并发布" : "连接签名器并发布"}</button>
               </div>
-              <p className="signing-note">使用浏览器中的 NIP-07 签名器；私钥不会交给此页面。</p>
+              <p className="signing-note">{signerType === "nip46" ? "使用远程签名器（NIP-46）；私钥不会交给此页面。" : "使用浏览器中的 NIP-07 签名器；私钥不会交给此页面。"}</p>
               {signerError && <p className="field-error">{signerError}</p>}
             </form>
           </section>

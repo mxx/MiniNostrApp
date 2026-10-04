@@ -567,7 +567,7 @@ describe("文案：中继在线 / 资讯中继管理 / utility bar hover 提示"
     expect(appSrc).toContain('title="使用说明"');
     expect(appSrc).toContain('title="版本更新，重新下载"');
     expect(appSrc).toContain('title={viewMode === "manual" ? "手动刷新帖子" : "重新连接资讯源"}');
-    expect(appSrc).toContain('title={pubkey ? "查看已连接身份" : "连接 NIP-07 签名器"}');
+    expect(appSrc).toContain('title={pubkey ? `已连接（${signerType === "nip46" ? "远程签名器" : "浏览器扩展"}），点击管理` : "连接签名器"}');
     // 早已存在的两个：
     expect(appSrc).toContain('title={incognitoMode ? "隐身模式：不自动加载远程头像" : "普通模式：自动加载远程头像"}');
     expect(appSrc).toContain('title={filtersActive(filters) ? "筛选已开启：隐藏回复 / 屏蔽关键词" : "筛选帖子：隐藏回复、屏蔽关键词"}');
