@@ -711,9 +711,13 @@ describe("每日推荐中继（lulin.org API）", () => {
     // .relay-pick 是 flex 行布局；URL 再长（code 已省略号截断），
     // 信息区也必须能收缩（min-width:0 + overflow:hidden），否则按钮被挤到可视区外，
     // 点推荐项毫无反应。按钮本身 flex:0 0 auto 不参与收缩。
+    // 另：.relay-picks-list 是 grid，grid 项默认 min-width:auto 会撑开，
+    // .relay-pick 自身也必须 min-width:0，否则外层先溢出。
     const infoRule = css.match(/\.relay-pick-info\s*\{[^}]*\}/)?.[0] ?? "";
     expect(infoRule).toContain("min-width: 0");
     expect(infoRule).toContain("overflow: hidden");
+    const itemRule = css.match(/\.relay-pick\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(itemRule).toContain("min-width: 0");
     const buttonRule = css.match(/\.pick-add\s*\{[^}]*\}/)?.[0] ?? "";
     expect(buttonRule).toContain("flex: 0 0 auto");
     const codeRule = css.match(/\.relay-pick-info code\s*\{[^}]*\}/)?.[0] ?? "";

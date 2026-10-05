@@ -178,7 +178,7 @@ h2 { font-size: 24px; line-height: 1.08; }
 .relay-picks h3 { margin: 0 0 4px; font-size: 14px; font-weight: 750; }
 .relay-picks h3 small { color: var(--dim); font-weight: 600; }
 .relay-picks-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
-.relay-pick { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.relay-pick { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); min-width: 0; }
 .relay-pick-info { min-width: 0; flex: 1 1 auto; overflow: hidden; }
 .relay-pick-info strong { font-size: 13px; }
 .relay-pick-info code { display: block; margin-top: 2px; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
