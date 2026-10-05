@@ -621,7 +621,9 @@ describe("对话 thread（帖子详情里的回复）", () => {
 
 describe("对话 thread：详情事件来源", () => {
   test("详情优先从主 events 取，缺失时回退 thread 缓存", () => {
-    expect(appSrc).toContain("seenThreadEventsRef.current.get(detailEventId)");
+    const lookup = appSrc.match(/const detailEvent =[\s\S]*?: null;/)?.[0] ?? "";
+    expect(lookup).toContain("findNoteById(detailEventId, [");
+    expect(lookup).toContain("seenThreadEventsRef.current,");
     expect(appSrc).toContain("seenThreadEventsRef.current.set(threadEvent.id, threadEvent)");
     expect(appSrc).toContain("seenThreadEventsRef.current.clear()");
   });
@@ -630,11 +632,12 @@ describe("对话 thread：详情事件来源", () => {
 describe("帖子详情：手动快照的老帖子也能打开", () => {
   test("detailEvent 同时查 events、manualEvents 与 thread 缓存", () => {
     const lookup = appSrc.match(/const detailEvent =[\s\S]*?: null;/)?.[0] ?? "";
-    expect(lookup).toContain("events.find((event) => event.id === detailEventId)");
+    expect(lookup).toContain("findNoteById(detailEventId, [");
+    expect(lookup).toContain("events,");
     // 手动模式卡片来自冻结快照 manualEvents，而 events 只保留最新 120 条；
     // 不查快照会导致点老帖子时详情打不开（点击展开全文没反应）。
-    expect(lookup).toContain("manualEvents.find((event) => event.id === detailEventId)");
-    expect(lookup).toContain("seenThreadEventsRef.current.get(detailEventId)");
+    expect(lookup).toContain("manualEvents,");
+    expect(lookup).toContain("seenThreadEventsRef.current,");
   });
 });
 

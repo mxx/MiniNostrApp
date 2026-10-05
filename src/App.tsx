@@ -541,6 +541,28 @@ export function longformKey(event: NostrEvent): string {
   return `${event.kind}:${event.pubkey}:${longformTagValue(event, "d")}`;
 }
 
+/**
+ * 按 id 在多个事件源里找帖子（详情页解析用）。
+ * 帖子可能只存在于某个专属订阅里（关注专属订阅、作者历史），
+ * 不在主 events 中；这里按优先级依次查找。
+ */
+export function findNoteById(
+  id: string,
+  sources: Array<NostrEvent[] | ReadonlyMap<string, NostrEvent> | null | undefined>,
+): NostrEvent | null {
+  for (const source of sources) {
+    if (!source) continue;
+    if (Array.isArray(source)) {
+      const found = source.find((event) => event.id === id);
+      if (found) return found;
+    } else {
+      const found = source.get(id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 /** 合并长文：按 longformKey 去重，同键只保留 created_at 最大的；按时间倒序。 */
 export function mergeLongformEvents(current: NostrEvent[], incoming: NostrEvent[]): NostrEvent[] {
   const byKey = new Map<string, NostrEvent>();
@@ -1313,13 +1335,17 @@ export function App() {
 
   const enabledRelays = useMemo(() => relays.filter((relay) => relay.enabled), [relays]);
   const onlineCount = enabledRelays.filter((relay) => relayStates[relay.url] === "online").length;
-  // 详情既可能来自主时间线，也可能来自手动模式的冻结快照（manualEvents），
+  // 详情既可能来自主时间线，也可能来自手动模式的冻结快照（manualEvents）、
+  // 关注专属订阅（followEvents）、作者历史（authorHistory），
   // 还可能来自某条回复的钻取（thread 回复不在主 events 里）。
   const detailEvent = detailEventId
-    ? events.find((event) => event.id === detailEventId)
-      ?? manualEvents.find((event) => event.id === detailEventId)
-      ?? seenThreadEventsRef.current.get(detailEventId)
-      ?? null
+    ? findNoteById(detailEventId, [
+        events,
+        manualEvents,
+        followEvents,
+        authorHistory?.events,
+        seenThreadEventsRef.current,
+      ])
     : null;
   const profileEvents = useMemo(() => {
     if (!profilePubkey) return [];
