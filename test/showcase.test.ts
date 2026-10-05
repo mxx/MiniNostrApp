@@ -706,4 +706,17 @@ describe("每日推荐中继（lulin.org API）", () => {
     expect(css).toContain(".relay-pick-info");
     expect(css).toContain(".pick-add");
   });
+
+  test("回归 2026-10-05：超长 URL 不能把「加入」按钮挤出屏幕", () => {
+    // .relay-pick 是 flex 行布局；URL 再长（code 已省略号截断），
+    // 信息区也必须能收缩（min-width:0 + overflow:hidden），否则按钮被挤到可视区外，
+    // 点推荐项毫无反应。按钮本身 flex:0 0 auto 不参与收缩。
+    const infoRule = css.match(/\.relay-pick-info\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(infoRule).toContain("min-width: 0");
+    expect(infoRule).toContain("overflow: hidden");
+    const buttonRule = css.match(/\.pick-add\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(buttonRule).toContain("flex: 0 0 auto");
+    const codeRule = css.match(/\.relay-pick-info code\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(codeRule).toContain("text-overflow: ellipsis");
+  });
 });
