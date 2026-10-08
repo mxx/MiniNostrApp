@@ -145,6 +145,52 @@ const LOCAL_FOLLOWS_STORAGE_KEY = "nostr-min-follows-local-v1";
 const EVENTS_STORAGE_KEY = "nostr-min-events-v1";
 const PROFILE_TTL_MS = 24 * 60 * 60 * 1000;
 export const MAX_EVENTS = 120;
+/**
+ * 每个中继在信息流里的保底名额。
+ * 不按流量比例分配（流量时刻变化、重连即清零，测不准），而是给每个启用的中继
+ * 一个固定的最低保障：低流量中继（如 lulin.org）的帖子不会被高流量中继全部挤掉。
+ * 剩余名额按全局最新填充。
+ */
+export const PER_RELAY_MIN = 15;
+
+/**
+ * 按中继保底配额截断信息流：每个中继（按事件首次见到的中继归属）至少保留
+ * perRelayMin 条最新事件，剩余名额按全局时间倒序填充，总数不超过 maxEvents。
+ * 输入需已按 created_at 倒序；返回同样倒序。纯函数，可测试。
+ */
+export function applyRelayQuotas(
+  events: NostrEvent[],
+  maxEvents: number,
+  perRelayMin: number,
+): NostrEvent[] {
+  if (events.length <= maxEvents) return events;
+  const byRelay = new Map<string, NostrEvent[]>();
+  for (const event of events) {
+    const relay = event.relays[0] ?? "";
+    const list = byRelay.get(relay);
+    if (list) list.push(event);
+    else byRelay.set(relay, [event]);
+  }
+  const picked = new Map<string, NostrEvent>();
+  // 1. 每个中继保底 perRelayMin 条最新（总数仍不超过 maxEvents）
+  for (const list of byRelay.values()) {
+    let kept = 0;
+    for (const event of list) {
+      if (kept >= perRelayMin || picked.size >= maxEvents) break;
+      if (!picked.has(event.id)) {
+        picked.set(event.id, event);
+        kept += 1;
+      }
+    }
+    if (picked.size >= maxEvents) break;
+  }
+  // 2. 剩余名额按全局最新填
+  for (const event of events) {
+    if (picked.size >= maxEvents) break;
+    if (!picked.has(event.id)) picked.set(event.id, event);
+  }
+  return [...picked.values()].sort((a, b) => b.created_at - a.created_at);
+}
 
 // Persisted feed: after the first successful load the latest notes survive
 // browser restarts and render instantly (even offline) before relays
@@ -1617,9 +1663,9 @@ export function App() {
         if (existing.relays.includes(relayUrl)) return current;
         return current.map((event) => event.id === incoming.id ? { ...event, relays: [...event.relays, relayUrl] } : event);
       }
-      return [{ ...incoming, relays: [relayUrl] }, ...current]
-        .sort((a, b) => b.created_at - a.created_at)
-        .slice(0, MAX_EVENTS);
+      const merged = [{ ...incoming, relays: [relayUrl] }, ...current]
+        .sort((a, b) => b.created_at - a.created_at);
+      return applyRelayQuotas(merged, MAX_EVENTS, PER_RELAY_MIN);
     });
   }, []);
 
@@ -2027,7 +2073,12 @@ export function App() {
       if (!isNostrEvent(signed, 1)) throw new Error("invalid signed event");
       publishAcksRef.current.set(signed.id, new Set());
       setPublishStatus({ eventId: signed.id, total: liveSockets.length, accepted: 0, rejected: 0, pending: liveSockets.length });
-      setEvents((current) => [{ ...signed, relays: ["本地发布"] }, ...current.filter((item) => item.id !== signed.id)].slice(0, MAX_EVENTS));
+      setEvents((current) => applyRelayQuotas(
+        [{ ...signed, relays: ["本地发布"] }, ...current.filter((item) => item.id !== signed.id)]
+          .sort((a, b) => b.created_at - a.created_at),
+        MAX_EVENTS,
+        PER_RELAY_MIN,
+      ));
       for (const [, socket] of liveSockets) socket.send(JSON.stringify(["EVENT", signed]));
       return true;
     } catch {
